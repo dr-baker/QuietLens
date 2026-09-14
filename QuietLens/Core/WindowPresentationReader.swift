@@ -8,6 +8,11 @@ import Darwin
 final class WindowPresentationReader {
     static let shared = WindowPresentationReader()
 
+    struct Presentation {
+        let frame: CGRect
+        let scale: CGFloat
+    }
+
     private typealias MainConnectionIDFunc = @convention(c) () -> Int32
     private typealias GetWindowRectFunc = @convention(c) (
         Int32, CGWindowID, UnsafeMutablePointer<CGRect>
@@ -48,7 +53,7 @@ final class WindowPresentationReader {
 
     /// Returns the current WindowServer presentation bounds in Core Graphics
     /// coordinates. The inverse transform maps window-local points to screen.
-    func presentationFrame(for windowID: CGWindowID) -> CGRect? {
+    func presentation(for windowID: CGWindowID) -> Presentation? {
         guard windowID != 0,
               let mainConnectionID = Self.mainConnectionID,
               let getWindowRect = Self.getWindowRect else { return nil }
@@ -61,21 +66,39 @@ final class WindowPresentationReader {
               Self.isValid(logicalFrame) else { return nil }
 
         guard let getWindowTransform = Self.getWindowTransform else {
-            return logicalFrame
+            return Presentation(frame: logicalFrame, scale: 1)
         }
 
         var transform = CGAffineTransform.identity
         guard getWindowTransform(connectionID, windowID, &transform) == 0,
               Self.isValid(transform) else {
-            return logicalFrame
+            return Presentation(frame: logicalFrame, scale: 1)
         }
 
         let determinant = transform.a * transform.d - transform.b * transform.c
-        guard abs(determinant) > 0.000_001 else { return logicalFrame }
+        guard abs(determinant) > 0.000_001 else {
+            return Presentation(frame: logicalFrame, scale: 1)
+        }
 
+        let inverseTransform = transform.inverted()
         let localBounds = CGRect(origin: .zero, size: logicalFrame.size)
-        let presentationFrame = localBounds.applying(transform.inverted()).standardized
-        return Self.isValid(presentationFrame) ? presentationFrame : logicalFrame
+        let presentationFrame = localBounds.applying(inverseTransform).standardized
+        guard Self.isValid(presentationFrame) else {
+            return Presentation(frame: logicalFrame, scale: 1)
+        }
+
+        // Mission Control uses a uniform affine scale. The geometric mean also
+        // gives a stable radius if WindowServer reports small axis differences.
+        let presentationScale = sqrt(abs(
+            inverseTransform.a * inverseTransform.d
+                - inverseTransform.b * inverseTransform.c
+        ))
+        let scale = presentationScale.isFinite ? max(0.05, min(2, presentationScale)) : 1
+        return Presentation(frame: presentationFrame, scale: scale)
+    }
+
+    func presentationFrame(for windowID: CGWindowID) -> CGRect? {
+        presentation(for: windowID)?.frame
     }
 
     /// Finds the frontmost transformed application window below a click in
@@ -91,8 +114,8 @@ final class WindowPresentationReader {
                   let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
                   ownerPID != excludingPID,
                   let windowID = window[kCGWindowNumber as String] as? CGWindowID,
-                  let frame = presentationFrame(for: windowID),
-                  Self.cgToCocoa(frame).contains(cocoaPoint) else { continue }
+                  let presentation = presentation(for: windowID),
+                  Self.cgToCocoa(presentation.frame).contains(cocoaPoint) else { continue }
             return windowID
         }
         return nil

@@ -2,6 +2,11 @@ import AppKit
 import QuartzCore
 
 final class CutoutView: NSView {
+    static var standardWindowCornerRadius: CGFloat {
+        if #available(macOS 26.0, *) { return 16 }
+        return 10
+    }
+
     weak var maskTarget: NSView?
     private let maskLayer = CAShapeLayer()
     private let glowLayer = CAShapeLayer()
@@ -26,12 +31,22 @@ final class CutoutView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func setCutouts(_ rects: [CGRect], duration: TimeInterval) {
+    func setCutouts(
+        _ rects: [CGRect],
+        duration: TimeInterval,
+        cornerRadius: CGFloat = CutoutView.standardWindowCornerRadius
+    ) {
         let path = CGMutablePath()
         path.addRect(bounds)
         let rimPath = CGMutablePath()
         for r in rects {
-            let rounded = CGPath(roundedRect: r, cornerWidth: 12, cornerHeight: 12, transform: nil)
+            let radius = min(cornerRadius, min(r.width, r.height) * 0.5)
+            let rounded = CGPath(
+                roundedRect: r,
+                cornerWidth: radius,
+                cornerHeight: radius,
+                transform: nil
+            )
             path.addPath(rounded)
             rimPath.addPath(rounded)
         }

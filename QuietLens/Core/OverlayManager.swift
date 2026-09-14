@@ -229,11 +229,12 @@ final class OverlayManager {
     private func refreshOverviewExitCutout() {
         guard overviewPhase == .exiting,
               let windowID = overviewExitWindowID,
-              let frame = WindowPresentationReader.shared.presentationFrame(for: windowID) else {
+              let presentation = WindowPresentationReader.shared.presentation(for: windowID) else {
             return
         }
 
-        let cocoaFrame = cgToCocoa(frame)
+        let cocoaFrame = cgToCocoa(presentation.frame)
+        let cornerRadius = CutoutView.standardWindowCornerRadius * presentation.scale
         for (_, window) in windows {
             let intersection = cocoaFrame.intersection(window.frame)
             let cutouts: [CGRect]
@@ -247,7 +248,7 @@ final class OverlayManager {
                     height: intersection.height
                 )]
             }
-            window.setCutouts(cutouts, duration: 0)
+            window.setCutouts(cutouts, duration: 0, cornerRadius: cornerRadius)
         }
     }
 
