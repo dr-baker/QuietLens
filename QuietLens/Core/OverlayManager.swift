@@ -11,6 +11,8 @@ final class OverlayManager {
     private var overviewPhase: OverviewDetector.Phase = .inactive
     private var overviewExitTimer: Timer?
     private var overviewExitWindowID: CGWindowID?
+    private var overviewExitCornerRadii: WindowCornerRadii?
+    private var focusedCornerRadii: WindowCornerRadii?
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
 
@@ -66,8 +68,9 @@ final class OverlayManager {
             overviewDetector.noteSelectionStarted()
         }
         focused = info
+        resolveFocusedCornerRadii(info)
         if overviewPhase == .exiting, let windowID = info?.windowNumber {
-            overviewExitWindowID = windowID
+            setOverviewExitWindow(windowID)
             refreshOverviewExitCutout()
         }
         refreshCutouts(animated: animated)
@@ -195,12 +198,12 @@ final class OverlayManager {
         ensureWindows()
         WindowRaiser.shared.clearAll()
         if let selectionLocation = overviewDetector.exitSelectionLocation {
-            overviewExitWindowID = WindowPresentationReader.shared.windowID(
+            setOverviewExitWindow(WindowPresentationReader.shared.windowID(
                 at: selectionLocation,
                 excludingPID: ProcessInfo.processInfo.processIdentifier
-            )
+            ))
         } else {
-            overviewExitWindowID = focused?.windowNumber
+            setOverviewExitWindow(focused?.windowNumber)
         }
         for (_, window) in windows {
             window.setCutouts([], duration: 0)
@@ -224,6 +227,7 @@ final class OverlayManager {
         overviewExitTimer?.invalidate()
         overviewExitTimer = nil
         overviewExitWindowID = nil
+        overviewExitCornerRadii = nil
     }
 
     private func refreshOverviewExitCutout() {
@@ -234,7 +238,8 @@ final class OverlayManager {
         }
 
         let cocoaFrame = cgToCocoa(presentation.frame)
-        let cornerRadius = CutoutView.standardWindowCornerRadius * presentation.scale
+        let cornerRadii = (overviewExitCornerRadii ?? CutoutView.standardWindowCornerRadii)
+            .scaled(by: presentation.scale)
         for (_, window) in windows {
             let intersection = cocoaFrame.intersection(window.frame)
             let cutouts: [CGRect]
@@ -248,7 +253,45 @@ final class OverlayManager {
                     height: intersection.height
                 )]
             }
-            window.setCutouts(cutouts, duration: 0, cornerRadius: cornerRadius)
+            window.setCutouts(cutouts, duration: 0, cornerRadii: cornerRadii)
+        }
+    }
+
+    private func resolveFocusedCornerRadii(_ info: FocusedWindowInfo?) {
+        guard let windowID = info?.windowNumber else {
+            focusedCornerRadii = nil
+            return
+        }
+        focusedCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        guard focusedCornerRadii == nil else { return }
+
+        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
+            guard let self, self.focused?.windowNumber == windowID else { return }
+            self.focusedCornerRadii = radii
+            if self.overviewPhase == .exiting, self.overviewExitWindowID == windowID {
+                self.overviewExitCornerRadii = radii
+                self.refreshOverviewExitCutout()
+            } else {
+                self.refreshCutouts(animated: false)
+            }
+        }
+    }
+
+    private func setOverviewExitWindow(_ windowID: CGWindowID?) {
+        overviewExitWindowID = windowID
+        guard let windowID else {
+            overviewExitCornerRadii = nil
+            return
+        }
+        overviewExitCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        guard overviewExitCornerRadii == nil else { return }
+
+        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
+            guard let self,
+                  self.overviewPhase == .exiting,
+                  self.overviewExitWindowID == windowID else { return }
+            self.overviewExitCornerRadii = radii
+            self.refreshOverviewExitCutout()
         }
     }
 
@@ -344,7 +387,11 @@ final class OverlayManager {
                               width: inter.width, height: inter.height)
             }
             for e in entries where e.windowID != 0 { allIDs.insert(e.windowID) }
-            w.setCutouts(cutouts, duration: animated ? settings.fadeDuration : 0)
+            w.setCutouts(
+                cutouts,
+                duration: animated ? settings.fadeDuration : 0,
+                cornerRadii: focusedCornerRadii ?? CutoutView.standardWindowCornerRadii
+            )
         }
         // Never raise our own windows (Settings / Onboarding). Otherwise every
         // refresh re-raises them to screenSaver level, which on macOS flashes

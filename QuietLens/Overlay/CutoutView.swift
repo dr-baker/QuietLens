@@ -7,6 +7,10 @@ final class CutoutView: NSView {
         return 10
     }
 
+    static var standardWindowCornerRadii: WindowCornerRadii {
+        WindowCornerRadii(uniform: standardWindowCornerRadius)
+    }
+
     weak var maskTarget: NSView?
     private let maskLayer = CAShapeLayer()
     private let glowLayer = CAShapeLayer()
@@ -34,19 +38,13 @@ final class CutoutView: NSView {
     func setCutouts(
         _ rects: [CGRect],
         duration: TimeInterval,
-        cornerRadius: CGFloat = CutoutView.standardWindowCornerRadius
+        cornerRadii: WindowCornerRadii = CutoutView.standardWindowCornerRadii
     ) {
         let path = CGMutablePath()
         path.addRect(bounds)
         let rimPath = CGMutablePath()
         for r in rects {
-            let radius = min(cornerRadius, min(r.width, r.height) * 0.5)
-            let rounded = CGPath(
-                roundedRect: r,
-                cornerWidth: radius,
-                cornerHeight: radius,
-                transform: nil
-            )
+            let rounded = Self.roundedRectPath(r, radii: cornerRadii)
             path.addPath(rounded)
             rimPath.addPath(rounded)
         }
@@ -81,6 +79,59 @@ final class CutoutView: NSView {
         glowLayer.path = rimPath
         currentPath = path
         currentRimPath = rimPath
+    }
+
+    private static func roundedRectPath(_ rect: CGRect, radii: WindowCornerRadii) -> CGPath {
+        let maximum = min(rect.width, rect.height) * 0.5
+        let topLeft = min(maximum, max(0, radii.topLeft))
+        let topRight = min(maximum, max(0, radii.topRight))
+        let bottomRight = min(maximum, max(0, radii.bottomRight))
+        let bottomLeft = min(maximum, max(0, radii.bottomLeft))
+        let path = CGMutablePath()
+
+        path.move(to: CGPoint(x: rect.minX + bottomLeft, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - bottomRight, y: rect.minY))
+        if bottomRight > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.maxX - bottomRight, y: rect.minY + bottomRight),
+                radius: bottomRight,
+                startAngle: -.pi / 2,
+                endAngle: 0,
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - topRight))
+        if topRight > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.maxX - topRight, y: rect.maxY - topRight),
+                radius: topRight,
+                startAngle: 0,
+                endAngle: .pi / 2,
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.minX + topLeft, y: rect.maxY))
+        if topLeft > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.minX + topLeft, y: rect.maxY - topLeft),
+                radius: topLeft,
+                startAngle: .pi / 2,
+                endAngle: .pi,
+                clockwise: false
+            )
+        }
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + bottomLeft))
+        if bottomLeft > 0 {
+            path.addArc(
+                center: CGPoint(x: rect.minX + bottomLeft, y: rect.minY + bottomLeft),
+                radius: bottomLeft,
+                startAngle: .pi,
+                endAngle: .pi * 3 / 2,
+                clockwise: false
+            )
+        }
+        path.closeSubpath()
+        return path
     }
 
     func applyGlow(enabled: Bool, color: NSColor, radius: CGFloat) {
