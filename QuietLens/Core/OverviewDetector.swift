@@ -16,6 +16,8 @@ final class OverviewDetector {
     private let onChange: (Phase) -> Void
     private let dockPID: pid_t?
     private var timer: Timer?
+    private var evaluationPending = false
+    private var evaluationGeneration = 0
     private var clickMonitor: Any?
     private var activationObserver: NSObjectProtocol?
     private var phase: Phase = .inactive
@@ -34,12 +36,13 @@ final class OverviewDetector {
 
     func start() {
         guard timer == nil else { return }
-        evaluate()
+        evaluationGeneration += 1
         let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.evaluate() }
         }
         timer.tolerance = 0.01
         self.timer = timer
+        evaluate()
 
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             let location = event.locationInWindow
@@ -55,6 +58,8 @@ final class OverviewDetector {
     }
 
     func stop() {
+        evaluationGeneration += 1
+        evaluationPending = false
         timer?.invalidate()
         timer = nil
         if let clickMonitor {
@@ -77,7 +82,21 @@ final class OverviewDetector {
     }
 
     private func evaluate() {
-        let overviewExists = Self.isOverviewActive(dockPID: dockPID)
+        guard !evaluationPending else { return }
+        evaluationPending = true
+        let dockPID = dockPID
+        let generation = evaluationGeneration
+        DispatchQueue.global(qos: .userInitiated).async {
+            let overviewExists = Self.isOverviewActive(dockPID: dockPID)
+            DispatchQueue.main.async { [weak self] in
+                self?.finishEvaluation(overviewExists, generation: generation)
+            }
+        }
+    }
+
+    private func finishEvaluation(_ overviewExists: Bool, generation: Int) {
+        guard generation == evaluationGeneration, timer != nil else { return }
+        evaluationPending = false
         let now = ProcessInfo.processInfo.systemUptime
 
         switch phase {
@@ -125,7 +144,7 @@ final class OverviewDetector {
         onChange(newPhase)
     }
 
-    private static func isOverviewActive(dockPID: pid_t?) -> Bool {
+    private nonisolated static func isOverviewActive(dockPID: pid_t?) -> Bool {
         guard let dockPID else { return false }
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
