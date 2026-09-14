@@ -4,6 +4,7 @@ import QuartzCore
 
 final class BlurOverlayView: NSView {
     private let effect: NSVisualEffectView
+    private let effectsView: NSView
     private let tintLayer = CALayer()
     private let gradientLayer = CAGradientLayer()
     private let grainLayer = CALayer()
@@ -12,6 +13,7 @@ final class BlurOverlayView: NSView {
 
     override init(frame frameRect: NSRect) {
         effect = NSVisualEffectView(frame: frameRect)
+        effectsView = NSView(frame: frameRect)
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -21,6 +23,15 @@ final class BlurOverlayView: NSView {
         effect.state = .active
         effect.appearance = NSAppearance(named: .darkAqua)
         addSubview(effect)
+
+        // Keep every color treatment in a sibling view above the material.
+        // NSVisualEffectView manages its own backing layers and can otherwise
+        // reorder root-layer siblings when its material changes.
+        effectsView.wantsLayer = true
+        effectsView.autoresizingMask = [.width, .height]
+        effectsView.layer?.masksToBounds = true
+        addSubview(effectsView, positioned: .above, relativeTo: effect)
+
         backdropLayer.frame = bounds
         backdropLayer.contentsGravity = .resizeAspectFill
         backdropLayer.isHidden = true
@@ -28,10 +39,10 @@ final class BlurOverlayView: NSView {
         gradientLayer.frame = bounds
         grainLayer.frame = bounds
         grainLayer.contentsGravity = .resizeAspectFill
-        layer?.addSublayer(backdropLayer)
-        layer?.addSublayer(tintLayer)
-        layer?.addSublayer(gradientLayer)
-        layer?.addSublayer(grainLayer)
+        effectsView.layer?.addSublayer(backdropLayer)
+        effectsView.layer?.addSublayer(tintLayer)
+        effectsView.layer?.addSublayer(gradientLayer)
+        effectsView.layer?.addSublayer(grainLayer)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -40,6 +51,7 @@ final class BlurOverlayView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         effect.frame = bounds
+        effectsView.frame = bounds
         backdropLayer.frame = bounds
         tintLayer.frame = bounds
         gradientLayer.frame = bounds
@@ -66,20 +78,18 @@ final class BlurOverlayView: NSView {
         } else {
             backdropLayer.isHidden = true
             effect.isHidden = false
-            if isTinted {
-                // Tinted mode = light blur so the tint dominates, color-cast feel.
-                effect.material = .hudWindow
-                effect.alphaValue = 0.45
-            } else {
-                // Material picks blur strength. Stronger materials = heavier blur.
-                switch radius {
-                case ..<10: effect.material = .hudWindow
-                case ..<25: effect.material = .underWindowBackground
-                case ..<40: effect.material = .fullScreenUI
-                default: effect.material = .menu
-                }
-                effect.alphaValue = isAmbient ? 0.65 : 1.0
+            // AppKit does not expose a continuous radius for visual-effect
+            // materials. Combine material steps with a continuous alpha ramp
+            // so every part of the strength control produces visible feedback.
+            switch radius {
+            case ..<10: effect.material = .hudWindow
+            case ..<25: effect.material = .underWindowBackground
+            case ..<40: effect.material = .fullScreenUI
+            default: effect.material = .menu
             }
+            let normalizedStrength = radius / 50
+            let modeScale: CGFloat = isAmbient ? 0.78 : 1.0
+            effect.alphaValue = (0.22 + normalizedStrength * 0.78) * modeScale
         }
 
         let opacity = max(0.1, min(1.0, settings.overlayOpacity)) * (isTinted ? 1.2 : 1.0)
