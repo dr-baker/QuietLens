@@ -41,6 +41,7 @@ final class OverlayManager {
     }
 
     func setExcluded(_ ex: Bool, animated: Bool) {
+        guard isExcluded != ex else { return }
         isExcluded = ex
         updateVisibility(animated: animated)
     }
@@ -50,9 +51,18 @@ final class OverlayManager {
         updateVisibility(animated: true)
     }
 
-    func updateFocus(_ info: FocusedWindowInfo?, animated: Bool) {
+    func updateFocus(_ info: FocusedWindowInfo?, excluded: Bool, animated: Bool) {
         focused = info
-        refreshCutouts(animated: animated)
+        isExcluded = excluded
+
+        let visible = shouldBeVisible()
+        if visible != isVisible {
+            updateVisibility(animated: animated)
+        } else if visible {
+            // A stale cutout exposes the previously focused window. Switch the
+            // mask immediately and reserve fadeDuration for show/hide changes.
+            refreshCutouts(animated: false)
+        }
     }
 
     func refreshAppearance() {
@@ -321,7 +331,12 @@ final class OverlayManager {
                     picked.append(WindowEntry(windowID: top.windowID, rect: top.rect))
                 }
             } else {
-                if let ax = focused?.frame, focused?.pid == frontPID {
+                if let windowID = focused?.windowNumber,
+                   focused?.pid == frontPID,
+                   let exact = entries.first(where: { $0.windowID == windowID && $0.rect.intersects(sf) }) {
+                    picked.append(WindowEntry(windowID: exact.windowID, rect: exact.rect))
+                }
+                if picked.isEmpty, let ax = focused?.frame, focused?.pid == frontPID {
                     let cocoa = axToCocoa(ax)
                     if cocoa.intersects(sf) {
                         let wid = focused?.windowNumber ?? entries.first(where: { $0.pid == frontPID && rectsApproxEqual($0.rect, cocoa) })?.windowID ?? 0

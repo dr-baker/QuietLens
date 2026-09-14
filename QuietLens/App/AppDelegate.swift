@@ -475,12 +475,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 
     @MainActor
     private func handleFocusChange(_ info: FocusedWindowInfo?) {
+        let excluded = info?.bundleID.map {
+            QuietLensSettings.shared.excludedBundleIDs.contains($0)
+        } ?? false
+        overlayManager.updateFocus(info, excluded: excluded, animated: true)
         if QuietLensSettings.shared.autoEnableOnFocus,
            !overlayManager.isEnabled, !userDisabledOverlay, info != nil {
             overlayManager.setEnabled(true, animated: true)
         }
-        applyCurrentExclusion()
-        overlayManager.updateFocus(info, animated: true)
         updateStatusIcon()
     }
 
