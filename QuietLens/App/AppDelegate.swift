@@ -158,8 +158,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
                 guard let self else { return }
                 self.updateStatusIcon()
                 self.overlayManager.refreshAppearance()
-                self.overlayManager.refreshGeometry()
-                self.windowTracker.refresh()
                 self.applyAutoHide()
                 let auto = QuietLensSettings.shared.autoDisableAfter
                 if auto != self.lastAutoDisable {
@@ -167,6 +165,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
                     self.scheduleAutoDisable(enabled: self.overlayManager.isEnabled)
                 }
             }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest(s.$autoHideDock.removeDuplicates(),
+                                 s.$autoHideMenuBar.removeDuplicates())
+            .dropFirst()
+            .debounce(for: .milliseconds(60), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.overlayManager.refreshGeometry() }
+            .store(in: &cancellables)
+
+        s.$excludedBundleIDs
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.applyCurrentExclusion() }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest(s.$pinnedBundleIDs.removeDuplicates(),
+                                 s.$highlightSameAppWindows.removeDuplicates())
+            .dropFirst()
+            .sink { [weak self] _ in self?.overlayManager.refreshFocusLayout() }
             .store(in: &cancellables)
         // iCloud push is debounced separately and much more loosely — the
         // 60ms cadence above fires on every slider tick, and each push hits
