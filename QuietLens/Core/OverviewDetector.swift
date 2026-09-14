@@ -22,6 +22,7 @@ final class OverviewDetector {
     private var overviewBeganAt: TimeInterval = 0
     private var exitBeganAt: TimeInterval = 0
     private var exitWasHinted = false
+    private(set) var exitSelectionLocation: CGPoint?
 
     init(onChange: @escaping (Phase) -> Void) {
         self.onChange = onChange
@@ -40,8 +41,9 @@ final class OverviewDetector {
         timer.tolerance = 0.01
         self.timer = timer
 
-        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
-            Task { @MainActor in self?.noteSelectionStarted() }
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            let location = event.locationInWindow
+            Task { @MainActor in self?.noteSelectionStarted(at: location) }
         }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -68,10 +70,10 @@ final class OverviewDetector {
 
     /// A click, app activation, or focused-window change while the overview
     /// still exists marks the beginning of its return animation.
-    func noteSelectionStarted() {
+    func noteSelectionStarted(at location: CGPoint? = nil) {
         guard phase == .active,
               ProcessInfo.processInfo.systemUptime - overviewBeganAt >= 0.12 else { return }
-        beginExit(hinted: true)
+        beginExit(hinted: true, selectionLocation: location)
     }
 
     private func evaluate() {
@@ -89,7 +91,7 @@ final class OverviewDetector {
                 // A keyboard or gesture exit can avoid both public hints. In
                 // that case, hold a short full-screen transition after the
                 // Dock surfaces disappear instead of flashing the final mask.
-                beginExit(hinted: false)
+                beginExit(hinted: false, selectionLocation: nil)
             }
         case .exiting:
             if !overviewExists {
@@ -106,16 +108,20 @@ final class OverviewDetector {
         }
     }
 
-    private func beginExit(hinted: Bool) {
+    private func beginExit(hinted: Bool, selectionLocation: CGPoint?) {
         guard phase == .active else { return }
         exitBeganAt = ProcessInfo.processInfo.systemUptime
         exitWasHinted = hinted
+        exitSelectionLocation = selectionLocation
         transition(to: .exiting)
     }
 
     private func transition(to newPhase: Phase) {
         guard phase != newPhase else { return }
         phase = newPhase
+        if newPhase != .exiting {
+            exitSelectionLocation = nil
+        }
         onChange(newPhase)
     }
 

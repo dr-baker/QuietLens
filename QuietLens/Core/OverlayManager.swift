@@ -9,6 +9,8 @@ final class OverlayManager {
     private var isPeeking: Bool = false
     private var isDragging: Bool = false
     private var overviewPhase: OverviewDetector.Phase = .inactive
+    private var overviewExitTimer: Timer?
+    private var overviewExitWindowID: CGWindowID?
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
 
@@ -43,6 +45,7 @@ final class OverlayManager {
         } else {
             overviewDetector.stop()
             overviewPhase = .inactive
+            stopOverviewExitTracking()
         }
         updateVisibility(animated: animated)
         if changed { onEnabledChanged?(on) }
@@ -59,8 +62,14 @@ final class OverlayManager {
     }
 
     func updateFocus(_ info: FocusedWindowInfo?, animated: Bool) {
-        overviewDetector.noteSelectionStarted()
+        if info != nil {
+            overviewDetector.noteSelectionStarted()
+        }
         focused = info
+        if overviewPhase == .exiting, let windowID = info?.windowNumber {
+            overviewExitWindowID = windowID
+            refreshOverviewExitCutout()
+        }
         refreshCutouts(animated: animated)
     }
 
@@ -82,10 +91,12 @@ final class OverlayManager {
 
         switch phase {
         case .active:
+            stopOverviewExitTracking()
             updateVisibility(animated: false)
         case .exiting:
             showOverviewExitEffect()
         case .inactive:
+            stopOverviewExitTracking()
             if shouldBeVisible(), isVisible {
                 refreshCutouts(animated: false)
             } else {
@@ -183,9 +194,60 @@ final class OverlayManager {
         isVisible = true
         ensureWindows()
         WindowRaiser.shared.clearAll()
+        if let selectionLocation = overviewDetector.exitSelectionLocation {
+            overviewExitWindowID = WindowPresentationReader.shared.windowID(
+                at: selectionLocation,
+                excludingPID: ProcessInfo.processInfo.processIdentifier
+            )
+        } else {
+            overviewExitWindowID = focused?.windowNumber
+        }
         for (_, window) in windows {
             window.setCutouts([], duration: 0)
             window.fadeIn(duration: OverviewDetector.exitBlendDuration)
+        }
+        refreshOverviewExitCutout()
+        startOverviewExitTracking()
+    }
+
+    private func startOverviewExitTracking() {
+        overviewExitTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshOverviewExitCutout() }
+        }
+        timer.tolerance = 0.001
+        RunLoop.main.add(timer, forMode: .common)
+        overviewExitTimer = timer
+    }
+
+    private func stopOverviewExitTracking() {
+        overviewExitTimer?.invalidate()
+        overviewExitTimer = nil
+        overviewExitWindowID = nil
+    }
+
+    private func refreshOverviewExitCutout() {
+        guard overviewPhase == .exiting,
+              let windowID = overviewExitWindowID,
+              let frame = WindowPresentationReader.shared.presentationFrame(for: windowID) else {
+            return
+        }
+
+        let cocoaFrame = cgToCocoa(frame)
+        for (_, window) in windows {
+            let intersection = cocoaFrame.intersection(window.frame)
+            let cutouts: [CGRect]
+            if intersection.isNull || intersection.isEmpty {
+                cutouts = []
+            } else {
+                cutouts = [CGRect(
+                    x: intersection.minX - window.frame.minX,
+                    y: intersection.minY - window.frame.minY,
+                    width: intersection.width,
+                    height: intersection.height
+                )]
+            }
+            window.setCutouts(cutouts, duration: 0)
         }
     }
 
@@ -264,9 +326,7 @@ final class OverlayManager {
         }
         if overviewPhase == .exiting {
             WindowRaiser.shared.clearAll()
-            for (_, window) in windows {
-                window.setCutouts([], duration: 0)
-            }
+            refreshOverviewExitCutout()
             return
         }
         let perScreen = computePerScreenWindows()
