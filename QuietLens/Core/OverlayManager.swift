@@ -8,7 +8,7 @@ final class OverlayManager {
     private var isExcluded: Bool = false
     private var isPeeking: Bool = false
     private var isDragging: Bool = false
-    private var isOverviewActive: Bool = false
+    private var overviewPhase: OverviewDetector.Phase = .inactive
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
 
@@ -21,8 +21,8 @@ final class OverlayManager {
     private var windows: [CGDirectDisplayID: OverlayWindow] = [:]
     private let settings: QuietLensSettings
     private var focused: FocusedWindowInfo?
-    private lazy var overviewDetector = OverviewDetector { [weak self] active in
-        self?.setOverviewActive(active)
+    private lazy var overviewDetector = OverviewDetector { [weak self] phase in
+        self?.setOverviewPhase(phase)
     }
 
     init(settings: QuietLensSettings) {
@@ -42,7 +42,7 @@ final class OverlayManager {
             overviewDetector.start()
         } else {
             overviewDetector.stop()
-            isOverviewActive = false
+            overviewPhase = .inactive
         }
         updateVisibility(animated: animated)
         if changed { onEnabledChanged?(on) }
@@ -59,6 +59,7 @@ final class OverlayManager {
     }
 
     func updateFocus(_ info: FocusedWindowInfo?, animated: Bool) {
+        overviewDetector.noteSelectionStarted()
         focused = info
         refreshCutouts(animated: animated)
     }
@@ -75,12 +76,22 @@ final class OverlayManager {
         refreshCutouts(animated: false)
     }
 
-    private func setOverviewActive(_ active: Bool) {
-        guard isOverviewActive != active else { return }
-        isOverviewActive = active
-        // Match the system overview animation without changing the user's
-        // enabled state. The overlay returns when Mission Control closes.
-        updateVisibility(animated: false)
+    private func setOverviewPhase(_ phase: OverviewDetector.Phase) {
+        guard overviewPhase != phase else { return }
+        overviewPhase = phase
+
+        switch phase {
+        case .active:
+            updateVisibility(animated: false)
+        case .exiting:
+            showOverviewExitEffect()
+        case .inactive:
+            if shouldBeVisible(), isVisible {
+                refreshCutouts(animated: false)
+            } else {
+                updateVisibility(animated: false)
+            }
+        }
     }
 
     @objc private func screensChanged() {
@@ -159,8 +170,23 @@ final class OverlayManager {
         if isExcluded { return false }
         if isPeeking { return false }
         if isDragging { return false }
-        if isOverviewActive { return false }
+        if overviewPhase == .active { return false }
         return true
+    }
+
+    private func showOverviewExitEffect() {
+        guard shouldBeVisible() else {
+            updateVisibility(animated: false)
+            return
+        }
+
+        isVisible = true
+        ensureWindows()
+        WindowRaiser.shared.clearAll()
+        for (_, window) in windows {
+            window.setCutouts([], duration: 0)
+            window.fadeIn(duration: OverviewDetector.exitBlendDuration)
+        }
     }
 
     private func updateVisibility(animated: Bool) {
@@ -234,6 +260,13 @@ final class OverlayManager {
     private func refreshCutouts(animated: Bool) {
         guard isVisible else {
             WindowRaiser.shared.clearAll()
+            return
+        }
+        if overviewPhase == .exiting {
+            WindowRaiser.shared.clearAll()
+            for (_, window) in windows {
+                window.setCutouts([], duration: 0)
+            }
             return
         }
         let perScreen = computePerScreenWindows()
