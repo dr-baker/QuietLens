@@ -8,6 +8,7 @@ final class OverlayManager {
     private var isExcluded: Bool = false
     private var isPeeking: Bool = false
     private var isDragging: Bool = false
+    private var isOverviewActive: Bool = false
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
 
@@ -20,6 +21,9 @@ final class OverlayManager {
     private var windows: [CGDirectDisplayID: OverlayWindow] = [:]
     private let settings: QuietLensSettings
     private var focused: FocusedWindowInfo?
+    private lazy var overviewDetector = OverviewDetector { [weak self] active in
+        self?.setOverviewActive(active)
+    }
 
     init(settings: QuietLensSettings) {
         self.settings = settings
@@ -35,6 +39,10 @@ final class OverlayManager {
         if on {
             isDragging = false
             isPeeking = false
+            overviewDetector.start()
+        } else {
+            overviewDetector.stop()
+            isOverviewActive = false
         }
         updateVisibility(animated: animated)
         if changed { onEnabledChanged?(on) }
@@ -65,6 +73,14 @@ final class OverlayManager {
             w.setFrame(overlayFrame(for: screen), display: true)
         }
         refreshCutouts(animated: false)
+    }
+
+    private func setOverviewActive(_ active: Bool) {
+        guard isOverviewActive != active else { return }
+        isOverviewActive = active
+        // Match the system overview animation without changing the user's
+        // enabled state. The overlay returns when Mission Control closes.
+        updateVisibility(animated: false)
     }
 
     @objc private func screensChanged() {
@@ -143,6 +159,7 @@ final class OverlayManager {
         if isExcluded { return false }
         if isPeeking { return false }
         if isDragging { return false }
+        if isOverviewActive { return false }
         return true
     }
 
