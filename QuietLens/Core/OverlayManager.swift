@@ -11,7 +11,9 @@ final class OverlayManager {
     private var overviewPhase: OverviewDetector.Phase = .inactive
     private var overviewExitTimer: Timer?
     private var overviewExitWindowID: CGWindowID?
+    private var overviewExitCornerFingerprint: WindowCornerFingerprint?
     private var overviewExitCornerRadii: WindowCornerRadii?
+    private var focusedCornerFingerprint: WindowCornerFingerprint?
     private var focusedCornerRadii: WindowCornerRadii?
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
@@ -69,7 +71,6 @@ final class OverlayManager {
             overviewDetector.noteSelectionStarted()
         }
         focused = info
-        resolveFocusedCornerRadii(info)
         isExcluded = excluded
         if overviewPhase == .exiting, let windowID = info?.windowNumber {
             setOverviewExitWindow(windowID)
@@ -241,6 +242,7 @@ final class OverlayManager {
         overviewExitTimer?.invalidate()
         overviewExitTimer = nil
         overviewExitWindowID = nil
+        overviewExitCornerFingerprint = nil
         overviewExitCornerRadii = nil
     }
 
@@ -272,15 +274,19 @@ final class OverlayManager {
     }
 
     private func resolveFocusedCornerRadii(_ info: FocusedWindowInfo?) {
-        guard let windowID = info?.windowNumber else {
+        guard let info, let windowID = info.windowNumber else {
+            focusedCornerFingerprint = nil
             focusedCornerRadii = nil
             return
         }
-        focusedCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        let fingerprint = cornerFingerprint(ownerPID: info.pid, frame: info.frame)
+        focusedCornerFingerprint = fingerprint
+        focusedCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID, fingerprint: fingerprint)
         guard focusedCornerRadii == nil else { return }
 
-        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
-            guard let self, self.focused?.windowNumber == windowID else { return }
+        WindowCornerReader.shared.resolve(windowID: windowID, fingerprint: fingerprint) { [weak self] radii in
+            guard let self, let radii, self.focused?.windowNumber == windowID,
+                  self.focusedCornerFingerprint == fingerprint else { return }
             self.focusedCornerRadii = radii
             if self.overviewPhase == .exiting, self.overviewExitWindowID == windowID {
                 self.overviewExitCornerRadii = radii
@@ -292,21 +298,49 @@ final class OverlayManager {
     }
 
     private func setOverviewExitWindow(_ windowID: CGWindowID?) {
+        let fingerprint = windowID.flatMap { cornerFingerprint(for: $0) }
+        guard overviewExitWindowID != windowID || overviewExitCornerFingerprint != fingerprint else { return }
         overviewExitWindowID = windowID
-        guard let windowID else {
+        overviewExitCornerFingerprint = fingerprint
+        guard let windowID, let fingerprint else {
             overviewExitCornerRadii = nil
             return
         }
-        overviewExitCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        overviewExitCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID, fingerprint: fingerprint)
         guard overviewExitCornerRadii == nil else { return }
 
-        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
-            guard let self,
+        WindowCornerReader.shared.resolve(windowID: windowID, fingerprint: fingerprint) { [weak self] radii in
+            guard let self, let radii,
                   self.overviewPhase == .exiting,
-                  self.overviewExitWindowID == windowID else { return }
+                  self.overviewExitWindowID == windowID,
+                  self.overviewExitCornerFingerprint == fingerprint else { return }
             self.overviewExitCornerRadii = radii
             self.refreshOverviewExitCutout()
         }
+    }
+
+    private func cornerFingerprint(for windowID: CGWindowID) -> WindowCornerFingerprint? {
+        if let focused, focused.windowNumber == windowID {
+            return cornerFingerprint(ownerPID: focused.pid, frame: focused.frame)
+        }
+        guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+              let window = list.first(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == windowID }),
+              let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+              let bounds = window[kCGWindowBounds as String] as? [String: Any],
+              let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return nil }
+        return cornerFingerprint(ownerPID: ownerPID, frame: frame)
+    }
+
+    private func cornerFingerprint(ownerPID: pid_t, frame: CGRect) -> WindowCornerFingerprint {
+        let cocoaFrame = cgToCocoa(frame)
+        let screen = NSScreen.screens.max {
+            let first = $0.frame.intersection(cocoaFrame)
+            let second = $1.frame.intersection(cocoaFrame)
+            return first.width * first.height < second.width * second.height
+        }
+        return WindowCornerFingerprint(
+            ownerPID: ownerPID, logicalSize: frame.size, displayScale: screen?.backingScaleFactor ?? 1
+        )
     }
 
     private func updateVisibility(animated: Bool) {
@@ -387,6 +421,7 @@ final class OverlayManager {
             refreshOverviewExitCutout()
             return
         }
+        resolveFocusedCornerRadii(focused)
         let perScreen = computePerScreenWindows()
         let ourPID = ProcessInfo.processInfo.processIdentifier
         var owners: [CGWindowID: pid_t] = [:]
