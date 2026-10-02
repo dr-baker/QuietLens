@@ -56,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         windowTracker.onWindowGeometryChanged = { [weak self] in
             self?.overlayManager.noteWindowGeometryChanging()
         }
+        windowTracker.onFocusLayoutRefresh = { [weak self] in
+            let settings = QuietLensSettings.shared
+            guard settings.highlightSameAppWindows || !settings.pinnedBundleIDs.isEmpty else { return }
+            self?.overlayManager.refreshFocusLayout()
+        }
         overlayManager.onEnabledChanged = { [weak self] enabled in
             guard let self else { return }
             self.windowTracker.setPollingEnabled(enabled)

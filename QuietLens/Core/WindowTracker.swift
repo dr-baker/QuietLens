@@ -36,6 +36,8 @@ final class WindowTracker {
     /// kAXWindowMoved / kAXWindowResized). Used to hide the overlay only
     /// during real window drags instead of on every mouse drag.
     var onWindowGeometryChanged: (() -> Void)?
+    /// Refreshes additional clear windows when focus itself has not changed.
+    var onFocusLayoutRefresh: (() -> Void)?
     private(set) var currentApp: NSRunningApplication?
     private var axObserver: AXObserver?
     private var axApp: AXUIElement?
@@ -58,8 +60,8 @@ final class WindowTracker {
     }
 
     /// The 0.5s poll is only a fallback for AX events the observer misses.
-    /// It costs an AX round-trip + CGWindowList scan per tick, so it runs
-    /// only while the overlay is enabled.
+    /// It reads AX focus only while the overlay is enabled. The host can
+    /// refresh additional cutouts after an unchanged focus read.
     func setPollingEnabled(_ on: Bool) {
         pollingDesired = on
         guard startedTracking else { return }
@@ -74,7 +76,10 @@ final class WindowTracker {
     private func startPollTimer() {
         guard pollTimer == nil else { return }
         let t = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in
+                guard let self else { return }
+                if !self.refresh() { self.onFocusLayoutRefresh?() }
+            }
         }
         t.tolerance = 0.1
         pollTimer = t
@@ -100,18 +105,24 @@ final class WindowTracker {
         if let app = axApp { AXUIElementSetMessagingTimeout(app, 0.4) }
         observedPID = pid
         var obs: AXObserver?
-        let cb: AXObserverCallback = { _, element, notification, refcon in
+        let cb: AXObserverCallback = { observer, element, notification, refcon in
             guard let refcon else { return }
             let me = Unmanaged<WindowTracker>.fromOpaque(refcon).takeUnretainedValue()
             let name = notification as String
             let retainedElement = Unmanaged.passRetained(element)
             Task { @MainActor in
                 let element = retainedElement.takeRetainedValue()
+                var elementPID: pid_t = 0
+                guard let currentObserver = me.axObserver,
+                      CFEqual(observer, currentObserver),
+                      let app = me.currentApp,
+                      app.processIdentifier == me.observedPID,
+                      app.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                      AXUIElementGetPid(element, &elementPID) == .success,
+                      elementPID == app.processIdentifier else { return }
                 let isGeometry = name == kAXWindowMovedNotification || name == kAXWindowResizedNotification
                 if isGeometry { me.onWindowGeometryChanged?() }
                 if !isGeometry,
-                   let app = me.currentApp,
-                   app.processIdentifier == me.observedPID,
                    let info = me.readWindow(element, app: app) {
                     me.publish(info)
                 } else {
@@ -130,15 +141,17 @@ final class WindowTracker {
         }
     }
 
-    func refresh() {
+    @discardableResult
+    func refresh() -> Bool {
         publish(readFocusedWindow())
     }
 
-    private func publish(_ info: FocusedWindowInfo?) {
-        if info != lastInfo {
-            lastInfo = info
-            onFocusedWindowChanged?(info)
-        }
+    @discardableResult
+    private func publish(_ info: FocusedWindowInfo?) -> Bool {
+        guard info != lastInfo else { return false }
+        lastInfo = info
+        onFocusedWindowChanged?(info)
+        return true
     }
 
     private func readFocusedWindow() -> FocusedWindowInfo? {
