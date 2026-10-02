@@ -4,6 +4,36 @@ All notable changes to Quiet Lens are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased — maintained fork
+
+### Fixed
+
+- Tint remains visible with blur, and blur strength has a useful range in Deep
+  and Tinted modes.
+- Appearance sliders respond continuously while dragging.
+- Focus tracking avoids redundant window scans and ignores queued events from
+  the previous app.
+- Pinned and same-app cutouts refresh when additional windows change; the focused
+  pinned window is included only once.
+- Overview detection handles Mission Control, App Exposé, and Dock replacement.
+- Overview exits track WindowServer presentation frames while restoring the
+  effect. Window corner sampling runs asynchronously with cached measurements.
+
+### Added
+
+- Stable build output, optional environment-based signing, universal build and
+  analysis checks, and Dock identity regression checks in CI.
+- Fork goals, development guidance, and a live verification checklist.
+
+### Changed
+
+- About links and manual update checks point to Daniel Baker's fork.
+- Update checks report when the fork has no published release.
+- Release packages use separate output directories. Version bumps leave the
+  inherited upstream Homebrew cask unchanged.
+
+Earlier entries below describe upstream releases.
+
 ## [1.0.8] — 2026-06-17
 
 **Build 8** · App icon refresh.
