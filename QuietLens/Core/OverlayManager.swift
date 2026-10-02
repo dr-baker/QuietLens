@@ -67,6 +67,10 @@ final class OverlayManager {
         refreshCutouts(animated: false)
     }
 
+    func refreshFocusLayout() {
+        refreshCutouts(animated: false)
+    }
+
     @objc private func screensChanged() {
         // Avoid rebuilding the overlay windows here. didChangeScreenParameters
         // fires for tiny visibleFrame changes too (e.g. when applyAutoHide

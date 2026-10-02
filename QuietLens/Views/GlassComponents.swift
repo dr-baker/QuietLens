@@ -366,7 +366,7 @@ struct GlassSlider: View {
             }
             .frame(height: 22)
             .contentShape(Rectangle())
-            .gesture(
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { g in
                         isDragging = true
