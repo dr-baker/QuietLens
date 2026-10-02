@@ -9,6 +9,10 @@ final class HotkeyManager {
     var onTogglePin: (() -> Void)?
 
     private let settings: QuietLensSettings
+    private let notificationCenter: NotificationCenter
+    private var shortcutObserver: NSObjectProtocol?
+    private var started = false
+    private var generation: UInt64 = 0
     private var toggleRef: EventHotKeyRef?
     private var settingsRef: EventHotKeyRef?
     private var excludeRef: EventHotKeyRef?
@@ -19,42 +23,92 @@ final class HotkeyManager {
     private static let excludeID: UInt32 = 3
     private static let pinID: UInt32 = 4
 
-    init(settings: QuietLensSettings) { self.settings = settings }
+    init(settings: QuietLensSettings, notificationCenter: NotificationCenter = .default) {
+        self.settings = settings
+        self.notificationCenter = notificationCenter
+    }
+
+    deinit {
+        if let shortcutObserver { notificationCenter.removeObserver(shortcutObserver) }
+        if let toggleRef { UnregisterEventHotKey(toggleRef) }
+        if let settingsRef { UnregisterEventHotKey(settingsRef) }
+        if let excludeRef { UnregisterEventHotKey(excludeRef) }
+        if let pinRef { UnregisterEventHotKey(pinRef) }
+        if let eventHandlerRef { RemoveEventHandler(eventHandlerRef) }
+    }
 
     func start() {
+        guard !started else { return }
+        started = true
+        generation &+= 1
+        let generation = generation
         installHandler()
         register()
-        NotificationCenter.default.addObserver(forName: .quietLensShortcutChanged, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.register() }
+        shortcutObserver = notificationCenter.addObserver(forName: .quietLensShortcutChanged, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.started, self.generation == generation else { return }
+                self.register()
+            }
         }
+    }
+
+    func stop() {
+        started = false
+        generation &+= 1
+        if let shortcutObserver {
+            notificationCenter.removeObserver(shortcutObserver)
+            self.shortcutObserver = nil
+        }
+        unregister()
+        if let eventHandlerRef {
+            RemoveEventHandler(eventHandlerRef)
+            self.eventHandlerRef = nil
+        }
+    }
+
+    static let carbonHandler: EventHandlerUPP = { _, evt, context in
+        guard let context else { return noErr }
+        let manager = Unmanaged<HotkeyManager>.fromOpaque(context).takeUnretainedValue()
+        var hk = EventHotKeyID()
+        guard GetEventParameter(evt, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                nil, MemoryLayout<EventHotKeyID>.size, nil, &hk) == noErr else { return noErr }
+        MainActor.assumeIsolated {
+            manager.receiveHotkey(hk.id)
+        }
+        return noErr
     }
 
     private func installHandler() {
         guard eventHandlerRef == nil else { return }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let cb: EventHandlerUPP = { _, evt, _ in
-            var hk = EventHotKeyID()
-            GetEventParameter(evt, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
-                              nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
-            Task { @MainActor in
-                switch hk.id {
-                case HotkeyManager.toggleID: AppDelegate.shared?.hotkeyManager.onToggle?()
-                case HotkeyManager.settingsID: AppDelegate.shared?.hotkeyManager.onOpenSettings?()
-                case HotkeyManager.excludeID: AppDelegate.shared?.hotkeyManager.onToggleExclude?()
-                case HotkeyManager.pinID: AppDelegate.shared?.hotkeyManager.onTogglePin?()
-                default: break
-                }
-            }
-            return noErr
-        }
-        InstallEventHandler(GetApplicationEventTarget(), cb, 1, &spec, nil, &eventHandlerRef)
+        InstallEventHandler(GetApplicationEventTarget(), Self.carbonHandler, 1, &spec,
+                            Unmanaged.passUnretained(self).toOpaque(), &eventHandlerRef)
     }
 
-    private func register() {
+    private func receiveHotkey(_ id: UInt32) {
+        guard started else { return }
+        let generation = generation
+        Task { @MainActor [weak self] in
+            guard let self, self.started, self.generation == generation else { return }
+            switch id {
+            case Self.toggleID: self.onToggle?()
+            case Self.settingsID: self.onOpenSettings?()
+            case Self.excludeID: self.onToggleExclude?()
+            case Self.pinID: self.onTogglePin?()
+            default: break
+            }
+        }
+    }
+
+    private func unregister() {
         if let r = toggleRef { UnregisterEventHotKey(r); toggleRef = nil }
         if let r = settingsRef { UnregisterEventHotKey(r); settingsRef = nil }
         if let r = excludeRef { UnregisterEventHotKey(r); excludeRef = nil }
         if let r = pinRef { UnregisterEventHotKey(r); pinRef = nil }
+    }
+
+    private func register() {
+        unregister()
         if let key = settings.toggleShortcutKey {
             toggleRef = registerKey(keyCode: key, mods: settings.toggleShortcutMods, id: Self.toggleID)
         }

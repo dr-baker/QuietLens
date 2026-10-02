@@ -18,12 +18,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Overview detection handles Mission Control, App Exposé, and Dock replacement.
 - Overview exits track WindowServer presentation frames while restoring the
   effect. Window corner sampling runs asynchronously with cached measurements.
+- Interrupted hide completions cannot hide a newly enabled overlay. Display
+  changes preserve existing overlay windows and show new ones after masking.
+- Missing overview presentation data clears stale cutouts and hides the effect
+  until a valid frame returns. Logical show requests respect this gate.
+- Overlapping cutouts remain clear. Windows crossing displays retain their
+  original corner geometry at the display boundary.
+- Window levels restore to their recorded values. Failed restores retain their
+  records through bounded retries, and stale owner IDs cannot mutate new windows.
+- Raised same-app and pinned windows remain eligible for cutouts on later scans.
+- Exclusions, pins, and same-app highlighting apply after settings assignment.
+- Explicit enable or disable requests cancel pauses, including an already-off
+  disable. Replaced timer callbacks cannot override newer state.
+- Disabled shake detection removes its event monitors and ends active peeks.
+  Hotkey stop/start keeps one observer and ignores queued events from an older run.
+- Unrelated appearance changes preserve shader animation phase. Reduce Motion
+  changes apply without another settings edit.
 
 ### Added
 
 - Stable build output, optional environment-based signing, universal build and
   analysis checks, and Dock identity regression checks in CI.
 - Fork goals, development guidance, and a live verification checklist.
+- Regression checks for settings delivery, timer cancellation, input monitor
+  ownership, window restoration, corner caching, selection, masks, and transitions.
 
 ### Changed
 
@@ -31,6 +49,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Update checks report when the fork has no published release.
 - Release packages use separate output directories. Version bumps leave the
   inherited upstream Homebrew cask unchanged.
+- Window-level APIs load optionally. Corner samples expire, use nominal point
+  resolution, and invalidate when owner, size, or display scale changes.
 
 Earlier entries below describe upstream releases.
 

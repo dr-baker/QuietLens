@@ -11,10 +11,13 @@ final class OverlayManager {
     private var overviewPhase: OverviewDetector.Phase = .inactive
     private var overviewExitTimer: Timer?
     private var overviewExitWindowID: CGWindowID?
+    private var overviewExitCornerFingerprint: WindowCornerFingerprint?
     private var overviewExitCornerRadii: WindowCornerRadii?
+    private var focusedCornerFingerprint: WindowCornerFingerprint?
     private var focusedCornerRadii: WindowCornerRadii?
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
+    private var dragMonitors: [Any] = []
 
     /// Fired whenever isEnabled flips, regardless of who flipped it (menu,
     /// hotkey, shake, URL automation, auto-disable). Lets AppDelegate keep
@@ -24,17 +27,34 @@ final class OverlayManager {
 
     private var windows: [CGDirectDisplayID: OverlayWindow] = [:]
     private let settings: QuietLensSettings
+    private let displays: () -> [OverlayDisplay]
+    private let windowInfo: (CGWindowListOption, CGWindowID) -> [[String: Any]]?
     private var focused: FocusedWindowInfo?
     private lazy var overviewDetector = OverviewDetector { [weak self] phase in
         self?.setOverviewPhase(phase)
     }
 
-    init(settings: QuietLensSettings) {
+    init(settings: QuietLensSettings,
+         displays: @escaping () -> [OverlayDisplay] = { NSScreen.screens.map(OverlayDisplay.init(screen:)) },
+         windowInfo: @escaping (CGWindowListOption, CGWindowID) -> [[String: Any]]? = {
+             CGWindowListCopyWindowInfo($0, $1) as? [[String: Any]]
+         }) {
         self.settings = settings
+        self.displays = displays
+        self.windowInfo = windowInfo
         NotificationCenter.default.addObserver(
             self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(accessibilityDisplayOptionsChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         observeDrag()
+    }
+
+    deinit {
+        for monitor in dragMonitors { NSEvent.removeMonitor(monitor) }
+        dragEndFailsafe?.cancel()
+        overviewExitTimer?.invalidate()
     }
 
     func setEnabled(_ on: Bool, animated: Bool) {
@@ -69,7 +89,6 @@ final class OverlayManager {
             overviewDetector.noteSelectionStarted()
         }
         focused = info
-        resolveFocusedCornerRadii(info)
         isExcluded = excluded
         if overviewPhase == .exiting, let windowID = info?.windowNumber {
             setOverviewExitWindow(windowID)
@@ -90,9 +109,14 @@ final class OverlayManager {
         for (_, w) in windows { w.applyAppearance(settings: settings) }
     }
 
+    @objc private func accessibilityDisplayOptionsChanged() {
+        refreshAppearance()
+    }
+
     func refreshGeometry() {
+        let screens = displays()
         for (id, w) in windows {
-            guard let screen = NSScreen.screens.first(where: { screenID($0) == id }) else { continue }
+            guard let screen = screens.first(where: { $0.id == id }) else { continue }
             w.setFrame(overlayFrame(for: screen), display: true)
         }
         refreshCutouts(animated: false)
@@ -114,34 +138,19 @@ final class OverlayManager {
             showOverviewExitEffect()
         case .inactive:
             stopOverviewExitTracking()
-            if shouldBeVisible(), isVisible {
-                refreshCutouts(animated: false)
-            } else {
-                updateVisibility(animated: false)
-            }
+            updateVisibility(animated: false)
         }
     }
 
     @objc private func screensChanged() {
-        // Avoid rebuilding the overlay windows here. didChangeScreenParameters
-        // fires for tiny visibleFrame changes too (e.g. when applyAutoHide
-        // toggles the menu-bar autoHide presentation option), and tearing
-        // the windows down + back up mid-fade caused a visible flash on
-        // every shake. Resize-in-place handles both monitor add/remove and
-        // visibleFrame changes; rebuildWindows happens lazily via
-        // ensureWindows() when the screen set actually differs.
-        let currentIDs = Set(windows.keys)
-        let newIDs = Set(NSScreen.screens.map { screenID($0) })
-        if currentIDs != newIDs {
-            rebuildWindows()
-        } else {
-            for screen in NSScreen.screens {
-                if let w = windows[screenID(screen)] {
-                    w.setFrame(overlayFrame(for: screen), display: true)
-                }
-            }
-        }
+        // Preserve unaffected windows and their fade state. New windows start
+        // transparent, and receive their masks before joining a visible effect.
+        let addedIDs = reconcileWindows()
+        if overviewPhase == .exiting { setOverviewExitWindow(overviewExitWindowID) }
         refreshCutouts(animated: false)
+        if isVisible, overviewPhase != .exiting {
+            for id in addedIDs { windows[id]?.fadeIn(duration: 0) }
+        }
     }
 
     private func observeDrag() {
@@ -150,20 +159,20 @@ final class OverlayManager {
         // via noteWindowGeometryChanging() — not on every left-drag.
         // Hiding on any drag made the overlay flicker during plain text
         // selection in the focused window.
-        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown], handler: { [weak self] _ in
             Task { @MainActor in self?.mouseButtonDown = true }
-        }
-        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
+        }) { dragMonitors.append(monitor) }
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { [weak self] _ in
             Task { @MainActor in self?.endDrag() }
-        }
-        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] ev in
+        }) { dragMonitors.append(monitor) }
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown], handler: { [weak self] ev in
             Task { @MainActor in self?.mouseButtonDown = true }
             return ev
-        }
-        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] ev in
+        }) { dragMonitors.append(monitor) }
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp], handler: { [weak self] ev in
             Task { @MainActor in self?.endDrag() }
             return ev
-        }
+        }) { dragMonitors.append(monitor) }
     }
 
     /// Called by WindowTracker on kAXWindowMoved / kAXWindowResized.
@@ -219,10 +228,6 @@ final class OverlayManager {
         } else {
             setOverviewExitWindow(focused?.windowNumber)
         }
-        for (_, window) in windows {
-            window.setCutouts([], duration: 0)
-            window.fadeIn(duration: OverviewDetector.exitBlendDuration)
-        }
         refreshOverviewExitCutout()
         startOverviewExitTracking()
     }
@@ -241,13 +246,20 @@ final class OverlayManager {
         overviewExitTimer?.invalidate()
         overviewExitTimer = nil
         overviewExitWindowID = nil
+        overviewExitCornerFingerprint = nil
         overviewExitCornerRadii = nil
     }
 
     private func refreshOverviewExitCutout() {
-        guard overviewPhase == .exiting,
-              let windowID = overviewExitWindowID,
+        guard overviewPhase == .exiting else { return }
+        guard shouldBeVisible(), let windowID = overviewExitWindowID,
               let presentation = WindowPresentationReader.shared.presentation(for: windowID) else {
+            // A missing presentation must not leave a hole at the last sample.
+            // Resume only after a valid frame, with its cutout installed first.
+            for window in windows.values {
+                window.setCutouts([], duration: 0)
+                window.fadeOut(duration: 0)
+            }
             return
         }
 
@@ -255,32 +267,26 @@ final class OverlayManager {
         let cornerRadii = (overviewExitCornerRadii ?? CutoutView.standardWindowCornerRadii)
             .scaled(by: presentation.scale)
         for (_, window) in windows {
-            let intersection = cocoaFrame.intersection(window.frame)
-            let cutouts: [CGRect]
-            if intersection.isNull || intersection.isEmpty {
-                cutouts = []
-            } else {
-                cutouts = [CGRect(
-                    x: intersection.minX - window.frame.minX,
-                    y: intersection.minY - window.frame.minY,
-                    width: intersection.width,
-                    height: intersection.height
-                )]
-            }
+            let cutouts = CutoutGeometry.localRect(for: cocoaFrame, overlay: window.frame).map { [$0] } ?? []
             window.setCutouts(cutouts, duration: 0, cornerRadii: cornerRadii)
+            window.fadeIn(duration: OverviewDetector.exitBlendDuration)
         }
     }
 
     private func resolveFocusedCornerRadii(_ info: FocusedWindowInfo?) {
-        guard let windowID = info?.windowNumber else {
+        guard let info, let windowID = info.windowNumber else {
+            focusedCornerFingerprint = nil
             focusedCornerRadii = nil
             return
         }
-        focusedCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        let fingerprint = cornerFingerprint(ownerPID: info.pid, frame: info.frame)
+        focusedCornerFingerprint = fingerprint
+        focusedCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID, fingerprint: fingerprint)
         guard focusedCornerRadii == nil else { return }
 
-        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
-            guard let self, self.focused?.windowNumber == windowID else { return }
+        WindowCornerReader.shared.resolve(windowID: windowID, fingerprint: fingerprint) { [weak self] radii in
+            guard let self, let radii, self.focused?.windowNumber == windowID,
+                  self.focusedCornerFingerprint == fingerprint else { return }
             self.focusedCornerRadii = radii
             if self.overviewPhase == .exiting, self.overviewExitWindowID == windowID {
                 self.overviewExitCornerRadii = radii
@@ -292,27 +298,64 @@ final class OverlayManager {
     }
 
     private func setOverviewExitWindow(_ windowID: CGWindowID?) {
+        let fingerprint = windowID.flatMap { cornerFingerprint(for: $0) }
+        guard overviewExitWindowID != windowID || overviewExitCornerFingerprint != fingerprint else { return }
         overviewExitWindowID = windowID
-        guard let windowID else {
+        overviewExitCornerFingerprint = fingerprint
+        guard let windowID, let fingerprint else {
             overviewExitCornerRadii = nil
             return
         }
-        overviewExitCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        overviewExitCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID, fingerprint: fingerprint)
         guard overviewExitCornerRadii == nil else { return }
 
-        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
-            guard let self,
+        WindowCornerReader.shared.resolve(windowID: windowID, fingerprint: fingerprint) { [weak self] radii in
+            guard let self, let radii,
                   self.overviewPhase == .exiting,
-                  self.overviewExitWindowID == windowID else { return }
+                  self.overviewExitWindowID == windowID,
+                  self.overviewExitCornerFingerprint == fingerprint else { return }
             self.overviewExitCornerRadii = radii
             self.refreshOverviewExitCutout()
         }
+    }
+
+    private func cornerFingerprint(for windowID: CGWindowID) -> WindowCornerFingerprint? {
+        if let focused, focused.windowNumber == windowID {
+            return cornerFingerprint(ownerPID: focused.pid, frame: focused.frame)
+        }
+        guard let list = windowInfo(.optionIncludingWindow, windowID),
+              let window = list.first(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == windowID }),
+              let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+              let bounds = window[kCGWindowBounds as String] as? [String: Any],
+              let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return nil }
+        return cornerFingerprint(ownerPID: ownerPID, frame: frame)
+    }
+
+    private func cornerFingerprint(ownerPID: pid_t, frame: CGRect) -> WindowCornerFingerprint {
+        let cocoaFrame = cgToCocoa(frame)
+        let screen = displays().max {
+            let first = $0.frame.intersection(cocoaFrame)
+            let second = $1.frame.intersection(cocoaFrame)
+            return first.width * first.height < second.width * second.height
+        }
+        return WindowCornerFingerprint(
+            ownerPID: ownerPID, logicalSize: frame.size, displayScale: screen?.scale ?? 1
+        )
     }
 
     private func updateVisibility(animated: Bool) {
         let visible = shouldBeVisible()
         isVisible = visible
         if visible {
+            if overviewPhase == .exiting {
+                if overviewExitTimer == nil {
+                    showOverviewExitEffect()
+                } else {
+                    ensureWindows()
+                    refreshOverviewExitCutout()
+                }
+                return
+            }
             ensureWindows()
             // Apply cutouts BEFORE fading in. Otherwise the user sees a
             // full-screen blur for one frame, then the focused-window
@@ -330,25 +373,32 @@ final class OverlayManager {
     }
 
     private func ensureWindows() {
-        if windows.isEmpty { rebuildWindows() }
+        if windows.isEmpty { _ = reconcileWindows() }
     }
 
-    private func rebuildWindows() {
-        for (_, w) in windows { w.orderOut(nil) }
-        windows.removeAll()
-        for screen in NSScreen.screens {
-            let frame = overlayFrame(for: screen)
-            let w = OverlayWindow(screen: screen, frame: frame)
-            w.applyAppearance(settings: settings)
-            windows[screenID(screen)] = w
+    private func reconcileWindows() -> Set<CGDirectDisplayID> {
+        let screens = displays()
+        let retiredIDs = Set(windows.keys).subtracting(screens.map(\.id))
+        for id in retiredIDs {
+            windows.removeValue(forKey: id)?.orderOut(nil)
         }
+        var addedIDs = Set<CGDirectDisplayID>()
+        for screen in screens {
+            let id = screen.id
+            let frame = overlayFrame(for: screen)
+            if let window = windows[id] {
+                if window.frame != frame { window.setFrame(frame, display: true) }
+            } else {
+                let window = OverlayWindow(frame: frame)
+                window.applyAppearance(settings: settings)
+                windows[id] = window
+                addedIDs.insert(id)
+            }
+        }
+        return addedIDs
     }
 
-    private func screenID(_ s: NSScreen) -> CGDirectDisplayID {
-        (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-    }
-
-    private func overlayFrame(for screen: NSScreen) -> NSRect {
+    private func overlayFrame(for screen: OverlayDisplay) -> NSRect {
         let full = screen.frame
         let vis = screen.visibleFrame
         var rect = full
@@ -387,72 +437,53 @@ final class OverlayManager {
             refreshOverviewExitCutout()
             return
         }
+        resolveFocusedCornerRadii(focused)
         let perScreen = computePerScreenWindows()
-        var allIDs = Set<CGWindowID>()
+        let displayIDs = Set(displays().map(\.id))
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        var owners: [CGWindowID: pid_t] = [:]
         for (id, w) in windows {
-            guard NSScreen.screens.first(where: { screenID($0) == id }) != nil else { continue }
+            guard displayIDs.contains(id) else { continue }
             let overlayRect = w.frame
             let entries = perScreen[id] ?? []
             let cutouts = entries.compactMap { entry -> CGRect? in
-                let inter = entry.rect.intersection(overlayRect)
-                if inter.isNull || inter.isEmpty { return nil }
-                return CGRect(x: inter.minX - overlayRect.minX,
-                              y: inter.minY - overlayRect.minY,
-                              width: inter.width, height: inter.height)
+                CutoutGeometry.localRect(for: entry.rect, overlay: overlayRect)
             }
-            for e in entries where e.windowID != 0 { allIDs.insert(e.windowID) }
+            // Carry ownership from the selection scan. Our settings and
+            // onboarding windows must never be raised above the overlay.
+            for entry in entries where entry.windowID != 0 && entry.pid != ourPID {
+                owners[entry.windowID] = entry.pid
+            }
             w.setCutouts(
                 cutouts,
                 duration: animated ? settings.fadeDuration : 0,
                 cornerRadii: focusedCornerRadii ?? CutoutView.standardWindowCornerRadii
             )
         }
-        // Never raise our own windows (Settings / Onboarding). Otherwise every
-        // refresh re-raises them to screenSaver level, which on macOS flashes
-        // them forward in the z-order — visible as Settings popping in and
-        // out on every shake.
-        let ourPID = ProcessInfo.processInfo.processIdentifier
-        if !allIDs.isEmpty,
-           let arr = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
-            for d in arr {
-                guard let pid = d[kCGWindowOwnerPID as String] as? pid_t, pid == ourPID,
-                      let wid = d[kCGWindowNumber as String] as? CGWindowID else { continue }
-                allIDs.remove(wid)
-            }
-        }
         let raiseLevel = Int32(CGWindowLevelForKey(.screenSaverWindow))
-        WindowRaiser.shared.setRaised(allIDs, level: raiseLevel)
+        WindowRaiser.shared.setRaised(owners, level: raiseLevel)
     }
 
-    struct WindowEntry {
-        let windowID: CGWindowID
-        let rect: CGRect
-        var pid: pid_t = 0
-    }
-
-    private func computePerScreenWindows() -> [CGDirectDisplayID: [WindowEntry]] {
+    private func computePerScreenWindows() -> [CGDirectDisplayID: [FocusWindowCandidate]] {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let arr = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return [:] }
+        guard let arr = windowInfo(opts, kCGNullWindowID) else { return [:] }
 
-        struct CGEntry {
-            let windowID: CGWindowID
-            let pid: pid_t
-            let rect: CGRect
-        }
-        var entries: [CGEntry] = []
+        var entries: [FocusWindowCandidate] = []
         for d in arr {
+            guard let pid = d[kCGWindowOwnerPID as String] as? pid_t else { continue }
+            let wid = (d[kCGWindowNumber as String] as? CGWindowID) ?? 0
             let layer = (d[kCGWindowLayer as String] as? Int) ?? 0
-            if layer > 0 { continue }
+            guard FocusWindowSelection.includesWindow(
+                layer: layer, isRaised: WindowRaiser.shared.isRaised(windowID: wid, ownerPID: pid)
+            ) else { continue }
             let onScreen = (d[kCGWindowIsOnscreen as String] as? Bool) ?? true
             if !onScreen { continue }
-            guard let pid = d[kCGWindowOwnerPID as String] as? pid_t else { continue }
             guard let b = d[kCGWindowBounds as String] as? [String: Any],
                   let r = CGRect(dictionaryRepresentation: b as CFDictionary) else { continue }
             let alpha = (d[kCGWindowAlpha as String] as? Double) ?? 1.0
             if alpha < 0.05 { continue }
             if r.width < 40 || r.height < 30 { continue }
-            let wid = (d[kCGWindowNumber as String] as? CGWindowID) ?? 0
-            entries.append(CGEntry(windowID: wid, pid: pid, rect: cgToCocoa(r)))
+            entries.append(FocusWindowCandidate(windowID: wid, pid: pid, rect: cgToCocoa(r)))
         }
 
         let ourPID = ProcessInfo.processInfo.processIdentifier
@@ -465,75 +496,20 @@ final class OverlayManager {
                 return app.processIdentifier
             })
         }()
-        var out: [CGDirectDisplayID: [WindowEntry]] = [:]
-
-        for screen in NSScreen.screens {
-            let id = screenID(screen)
-            let sf = screen.frame
-            var picked: [WindowEntry] = []
-
-            for e in entries where pinnedPIDs.contains(e.pid) && e.rect.intersects(sf) {
-                picked.append(WindowEntry(windowID: e.windowID, rect: e.rect))
-            }
-
-            if settings.highlightSameAppWindows {
-                for e in entries where e.pid == frontPID {
-                    if e.rect.intersects(sf) && !picked.contains(where: { rectsApproxEqual($0.rect, e.rect) }) {
-                        picked.append(WindowEntry(windowID: e.windowID, rect: e.rect))
-                    }
-                }
-                if let ax = focused?.frame, focused?.pid == frontPID {
-                    let cocoa = axToCocoa(ax)
-                    if cocoa.intersects(sf) && !picked.contains(where: { rectsApproxEqual($0.rect, cocoa) }) {
-                        let wid = focused?.windowNumber ?? 0
-                        picked.append(WindowEntry(windowID: wid, rect: cocoa))
-                    }
-                }
-                if picked.isEmpty, let top = entries.first(where: { $0.pid != ourPID && $0.rect.intersects(sf) }) {
-                    picked.append(WindowEntry(windowID: top.windowID, rect: top.rect))
-                }
-            } else {
-                if let windowID = focused?.windowNumber,
-                   focused?.pid == frontPID,
-                   let exact = entries.first(where: { $0.windowID == windowID && $0.rect.intersects(sf) }) {
-                    if !picked.contains(where: { $0.windowID == exact.windowID }) {
-                        picked.append(WindowEntry(windowID: exact.windowID, rect: exact.rect))
-                    }
-                }
-                if picked.isEmpty, let ax = focused?.frame, focused?.pid == frontPID {
-                    let cocoa = axToCocoa(ax)
-                    if cocoa.intersects(sf) {
-                        let wid = focused?.windowNumber ?? entries.first(where: { $0.pid == frontPID && rectsApproxEqual($0.rect, cocoa) })?.windowID ?? 0
-                        picked.append(WindowEntry(windowID: wid, rect: cocoa))
-                    }
-                }
-                if picked.isEmpty,
-                   let top = entries.first(where: { $0.pid == frontPID && $0.rect.intersects(sf) }) {
-                    picked.append(WindowEntry(windowID: top.windowID, rect: top.rect))
-                }
-                if picked.isEmpty,
-                   let any = entries.first(where: { $0.pid != ourPID && $0.rect.intersects(sf) }) {
-                    picked.append(WindowEntry(windowID: any.windowID, rect: any.rect))
-                }
-            }
-            out[id] = picked
+        let focus = focused.map {
+            FocusWindowCandidate(windowID: $0.windowNumber ?? 0, pid: $0.pid, rect: cgToCocoa($0.frame))
         }
-        return out
-    }
-
-    private func axToCocoa(_ r: CGRect) -> CGRect {
-        guard let primary = NSScreen.screens.first else { return r }
-        let topY = primary.frame.maxY
-        return CGRect(x: r.origin.x, y: topY - r.origin.y - r.size.height, width: r.size.width, height: r.size.height)
-    }
-
-    private func rectsApproxEqual(_ a: CGRect, _ b: CGRect) -> Bool {
-        abs(a.minX - b.minX) < 4 && abs(a.minY - b.minY) < 4 &&
-        abs(a.width - b.width) < 4 && abs(a.height - b.height) < 4
+        return Dictionary(uniqueKeysWithValues: displays().map { screen in
+            (screen.id, FocusWindowSelection.select(
+                entries: entries, screen: screen.frame, focused: focus, frontPID: frontPID,
+                pinnedPIDs: pinnedPIDs, highlightSameAppWindows: settings.highlightSameAppWindows,
+                ourPID: ourPID
+            ))
+        })
     }
 
     private func cgToCocoa(_ r: CGRect) -> CGRect {
-        guard let primary = NSScreen.screens.first else { return r }
+        guard let primary = displays().first else { return r }
         let topY = primary.frame.maxY
         return CGRect(x: r.origin.x, y: topY - r.origin.y - r.size.height, width: r.size.width, height: r.size.height)
     }
