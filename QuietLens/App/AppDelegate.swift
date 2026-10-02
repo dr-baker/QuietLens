@@ -4,6 +4,9 @@ import Combine
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unchecked Sendable {
     @MainActor func applicationWillTerminate(_ notification: Notification) {
+        axPollTimer?.invalidate()
+        shakeDetector?.stop()
+        hotkeyManager?.stop()
         WindowRaiser.shared.clearAll()
     }
 
@@ -132,6 +135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
                     }
                 } else if !trusted && self.trackingStarted {
                     self.trackingStarted = false
+                    self.shakeDetector.stop()
+                    self.hotkeyManager.stop()
                     self.wasShowingOnboarding = true
                     self.showOnboarding()
                 }
