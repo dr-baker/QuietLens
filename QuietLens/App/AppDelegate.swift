@@ -5,6 +5,7 @@ import Combine
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unchecked Sendable {
     @MainActor func applicationWillTerminate(_ notification: Notification) {
         axPollTimer?.invalidate()
+        overlayTimers.cancelAll()
         shakeDetector?.stop()
         hotkeyManager?.stop()
         WindowRaiser.shared.clearAll()
@@ -35,6 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var onboardingWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
     private var committedSettingsEffects: [CommittedSettingsEffect] = []
+    @MainActor private lazy var overlayTimers = OverlayTimers(
+        isEnabled: { [weak self] in self?.overlayManager?.isEnabled ?? false },
+        requestEnabled: { [weak self] on in self?.overlayManager?.setEnabled(on, animated: true) }
+    )
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -69,8 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
             guard let self else { return }
             self.windowTracker.setPollingEnabled(enabled)
             if enabled {
-                self.pauseTimer?.invalidate()
-                self.pauseTimer = nil
+                self.overlayTimers.cancelPause()
                 self.windowTracker.refresh()
                 self.applyCurrentExclusion()
             }
@@ -92,13 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 
     private var trackingStarted = false
     private var axPollTimer: Timer?
-    private var autoDisableTimer: Timer?
-    private var pauseTimer: Timer?
     private var lastAutoDisable: AutoDisableAfter = .never
-    /// True after the user explicitly turned the overlay off. Suppresses
-    /// auto-enable-on-focus until the user turns it back on, so the setting
-    /// can't fight a deliberate "off".
-    private var userDisabledOverlay = false
 
     private var wasShowingOnboarding = false
 
@@ -244,32 +242,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 
     @MainActor
     private func scheduleAutoDisable(enabled: Bool) {
-        autoDisableTimer?.invalidate()
-        autoDisableTimer = nil
-        guard enabled, let secs = QuietLensSettings.shared.autoDisableAfter.seconds else { return }
-        let t = Timer.scheduledTimer(withTimeInterval: secs, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.overlayManager.isEnabled else { return }
-                // Route through setOverlayEnabled so auto-enable-on-focus
-                // doesn't immediately undo the auto-disable on the next
-                // focus change.
-                self.setOverlayEnabled(false)
-            }
-        }
-        t.tolerance = min(30, secs * 0.05)
-        autoDisableTimer = t
+        overlayTimers.scheduleAutoDisable(enabled: enabled, after: QuietLensSettings.shared.autoDisableAfter.seconds)
     }
 
     @MainActor
     func pauseOverlay(for seconds: TimeInterval) {
-        guard overlayManager.isEnabled else { return }
-        userDisabledOverlay = true
-        overlayManager.setEnabled(false, animated: true)
-        let t = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.setOverlayEnabled(true) }
-        }
-        t.tolerance = 5
-        pauseTimer = t
+        overlayTimers.pause(for: seconds)
     }
 
     private func setupURLHandler() {
@@ -426,8 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     /// auto-hide, and re-reading the frontmost window.
     @MainActor
     func setOverlayEnabled(_ on: Bool) {
-        userDisabledOverlay = !on
-        overlayManager.setEnabled(on, animated: true)
+        overlayTimers.setEnabled(on)
     }
 
     @MainActor
@@ -508,7 +485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         } ?? false
         overlayManager.updateFocus(info, excluded: excluded, animated: true)
         if QuietLensSettings.shared.autoEnableOnFocus,
-           !overlayManager.isEnabled, !userDisabledOverlay, info != nil {
+           !overlayManager.isEnabled, !overlayTimers.userDisabledOverlay, info != nil {
             overlayManager.setEnabled(true, animated: true)
         }
         updateStatusIcon()
