@@ -257,18 +257,7 @@ final class OverlayManager {
         let cornerRadii = (overviewExitCornerRadii ?? CutoutView.standardWindowCornerRadii)
             .scaled(by: presentation.scale)
         for (_, window) in windows {
-            let intersection = cocoaFrame.intersection(window.frame)
-            let cutouts: [CGRect]
-            if intersection.isNull || intersection.isEmpty {
-                cutouts = []
-            } else {
-                cutouts = [CGRect(
-                    x: intersection.minX - window.frame.minX,
-                    y: intersection.minY - window.frame.minY,
-                    width: intersection.width,
-                    height: intersection.height
-                )]
-            }
+            let cutouts = CutoutGeometry.localRect(for: cocoaFrame, overlay: window.frame).map { [$0] } ?? []
             window.setCutouts(cutouts, duration: 0, cornerRadii: cornerRadii)
         }
     }
@@ -430,11 +419,7 @@ final class OverlayManager {
             let overlayRect = w.frame
             let entries = perScreen[id] ?? []
             let cutouts = entries.compactMap { entry -> CGRect? in
-                let inter = entry.rect.intersection(overlayRect)
-                if inter.isNull || inter.isEmpty { return nil }
-                return CGRect(x: inter.minX - overlayRect.minX,
-                              y: inter.minY - overlayRect.minY,
-                              width: inter.width, height: inter.height)
+                CutoutGeometry.localRect(for: entry.rect, overlay: overlayRect)
             }
             // Carry ownership from the selection scan. Our settings and
             // onboarding windows must never be raised above the overlay.
