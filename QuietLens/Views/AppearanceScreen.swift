@@ -53,17 +53,17 @@ struct AppearanceScreen: View {
                 }
             }
 
-            if match("blur opacity radius") {
+            if match("blur opacity strength") {
                 SectionLabel(text: "Blur & Opacity")
                 GlassPanel {
-                    SettingsRow(icon: "drop", title: "Blur radius", isFirst: true,
+                    SettingsRow(icon: "drop", title: "Blur strength", isFirst: true,
                                 trailing: {
-                        Text("\(Int(round(settings.blurRadius)))px")
+                        Text("\(Int(round(settings.blurRadius * 2)))%")
                             .font(FL.T.mono())
                             .foregroundStyle(FL.C.text2(scheme))
                     },
                                 below: {
-                        GlassSlider(value: $settings.blurRadius, range: 0...60, a11yLabel: "Blur radius")
+                        GlassSlider(value: $settings.blurRadius, range: 0...50, a11yLabel: "Blur strength")
                             .padding(.top, 6)
                     })
 
