@@ -48,7 +48,29 @@ final class WindowRaiser {
     /// The owner comes from the caller's current selection, so an old window
     /// number cannot raise a different process's replacement window.
     func setRaised(_ windows: [CGWindowID: pid_t], level: Int32) {
-        requestedOwners = windows.filter { $0.key != 0 && $0.value > 0 }
+        let nextOwners = windows.filter { $0.key != 0 && $0.value > 0 }
+        updateRaised(nextOwners, level: level, retryExhausted: nextOwners != requestedOwners)
+    }
+
+    /// Also includes windows awaiting restoration after a failed backend call.
+    /// Matching the scan's owner prevents stale IDs from preserving a new window.
+    func isRaised(windowID: CGWindowID, ownerPID: pid_t) -> Bool {
+        raised[windowID]?.ownerPID == ownerPID
+    }
+
+    /// Explicit clears may begin another bounded batch after an outage. Layout
+    /// refreshes pass false so they cannot restart exhausted batches.
+    func clearAll(retryExhausted: Bool = true) {
+        updateRaised([:], level: 0, retryExhausted: retryExhausted)
+    }
+
+    private func updateRaised(
+        _ nextOwners: [CGWindowID: pid_t],
+        level: Int32,
+        retryExhausted: Bool
+    ) {
+        requestedOwners = nextOwners
+        if retryExhausted { rearmExhaustedRestorations() }
 
         for (windowID, record) in raised
             where requestedOwners[windowID] != record.ownerPID
@@ -90,14 +112,13 @@ final class WindowRaiser {
         scheduleRestorationRetryIfNeeded()
     }
 
-    /// Also includes windows awaiting restoration after a failed backend call.
-    /// Matching the scan's owner prevents stale IDs from preserving a new window.
-    func isRaised(windowID: CGWindowID, ownerPID: pid_t) -> Bool {
-        raised[windowID]?.ownerPID == ownerPID
-    }
-
-    func clearAll() {
-        setRaised([:], level: 0)
+    private func rearmExhaustedRestorations() {
+        for (windowID, var record) in raised
+            where requestedOwners[windowID] != record.ownerPID
+                && record.restorationAttempts >= maximumRestorationAttempts {
+            record.restorationAttempts = 0
+            raised[windowID] = record
+        }
     }
 
     private func restore(_ windowID: CGWindowID) {
