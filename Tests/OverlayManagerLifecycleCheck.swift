@@ -35,7 +35,8 @@ enum CutoutView {
 
 @MainActor final class WindowRaiser {
     static let shared = WindowRaiser()
-    func clearAll() {}
+    var clearRequests: [Bool] = []
+    func clearAll(retryExhausted: Bool = true) { clearRequests.append(retryExhausted) }
     func setRaised(_ owners: [CGWindowID: pid_t], level: Int32) {}
     func isRaised(windowID: CGWindowID, ownerPID: pid_t) -> Bool { false }
 }
@@ -117,6 +118,7 @@ struct OverlayManagerLifecycleCheck {
         WindowPresentationReader.shared.current = .init(frame: CGRect(x: 100, y: 100, width: 200, height: 150), scale: 1)
         manager.refreshFocusLayout()
         precondition(first.visible && !first.cutouts.isEmpty)
+        precondition(WindowRaiser.shared.clearRequests.last == false)
         precondition(first.events.suffix(2) == ["mask", "show"])
         manager.peek(true)
         manager.refreshFocusLayout()
@@ -140,7 +142,9 @@ struct OverlayManagerLifecycleCheck {
         manager.refreshFocusLayout()
         precondition(first.visible && !first.cutouts.isEmpty)
         manager.setEnabled(false, animated: false)
+        precondition(WindowRaiser.shared.clearRequests.last == true)
         manager.refreshFocusLayout()
+        precondition(WindowRaiser.shared.clearRequests.last == false)
         precondition(!first.visible)
 
         // A newly connected display remains hidden while the overview is active.

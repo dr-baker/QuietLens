@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   original corner geometry at the display boundary.
 - Window levels restore to their recorded values. Failed restores retain their
   records through bounded retries, and stale owner IDs cannot mutate new windows.
+- Exhausted window restorations can recover on a new selection or explicit clear
+  after a transient backend outage. Periodic cutout refreshes cannot restart
+  exhausted retry batches.
 - Raised same-app and pinned windows remain eligible for cutouts on later scans.
 - Exclusions, pins, and same-app highlighting apply after settings assignment.
 - Explicit enable or disable requests cancel pauses, including an already-off

@@ -15,7 +15,8 @@ The script runs eleven standalone checks against production components:
 - `InputMonitorLifecycleCheck` covers disabled shake monitors, sampling limits,
   peek cleanup, hotkey observer ownership, Carbon dispatch, and stale key events.
 - `WindowRaiserCheck` covers original levels, successful and failed mutations,
-  owner reuse, missing APIs, bounded restoration retries, and reselection.
+  owner reuse, missing APIs, bounded restoration retries, fresh-event recovery
+  after exhaustion, passive refreshes, and shared queued retries.
 - `WindowCornerCacheCheck` covers failure cooldowns, sample expiry, owner, size,
   and scale invalidation, stale captures, callback limits, and work bounds.
 - `FocusWindowSelectionCheck` covers focused, pinned, same-app, coincident, and
@@ -37,6 +38,12 @@ The script also builds the universal Release app and runs Xcode analysis.
 These checks do not launch the app, restart Dock, or grant permissions. They do
 not prove animation smoothness, cutout accuracy, or private-API behavior on a
 particular macOS version.
+
+Each window gets at most four restoration attempts per batch. Exhausted records
+retain their original owner and level, but schedule no further automatic retries.
+A changed selection or an explicit `clearAll()` starts a new batch for exhausted
+records. Periodic cutout refreshes use `clearAll(retryExhausted: false)` and cannot
+restart exhausted batches. Every attempt validates the current owner before mutation.
 
 ## Live acceptance
 

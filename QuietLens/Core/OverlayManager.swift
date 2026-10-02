@@ -429,11 +429,11 @@ final class OverlayManager {
 
     private func refreshCutouts(animated: Bool) {
         guard isVisible else {
-            WindowRaiser.shared.clearAll()
+            WindowRaiser.shared.clearAll(retryExhausted: false)
             return
         }
         if overviewPhase == .exiting {
-            WindowRaiser.shared.clearAll()
+            WindowRaiser.shared.clearAll(retryExhausted: false)
             refreshOverviewExitCutout()
             return
         }
