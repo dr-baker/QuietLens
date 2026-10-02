@@ -6,11 +6,31 @@ struct FocusedWindowInfo: Equatable {
     let bundleID: String?
     let frame: CGRect
     let windowNumber: CGWindowID?
-    let allAppFrames: [CGRect]
 }
 
 @MainActor
 final class WindowTracker {
+    private typealias AXUIElementGetWindowFunc = @convention(c) (
+        AXUIElement, UnsafeMutablePointer<UInt32>
+    ) -> AXError
+
+    private nonisolated(unsafe) static let hiServicesHandle: UnsafeMutableRawPointer? = {
+        dlopen(
+            "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices",
+            RTLD_NOW
+        )
+    }()
+
+    private nonisolated static let axUIElementGetWindow: AXUIElementGetWindowFunc? = {
+        guard let handle = hiServicesHandle else { return nil }
+        for name in ["_AXUIElementGetWindow", "AXUIElementGetWindow"] {
+            if let symbol = dlsym(handle, name) {
+                return unsafeBitCast(symbol, to: AXUIElementGetWindowFunc.self)
+            }
+        }
+        return nil
+    }()
+
     var onFocusedWindowChanged: ((FocusedWindowInfo?) -> Void)?
     /// Fires when the focused window is being moved or resized (AX
     /// kAXWindowMoved / kAXWindowResized). Used to hide the overlay only
@@ -80,14 +100,23 @@ final class WindowTracker {
         if let app = axApp { AXUIElementSetMessagingTimeout(app, 0.4) }
         observedPID = pid
         var obs: AXObserver?
-        let cb: AXObserverCallback = { _, _, notification, refcon in
+        let cb: AXObserverCallback = { _, element, notification, refcon in
             guard let refcon else { return }
             let me = Unmanaged<WindowTracker>.fromOpaque(refcon).takeUnretainedValue()
             let name = notification as String
-            let isGeometry = name == kAXWindowMovedNotification || name == kAXWindowResizedNotification
+            let retainedElement = Unmanaged.passRetained(element)
             Task { @MainActor in
+                let element = retainedElement.takeRetainedValue()
+                let isGeometry = name == kAXWindowMovedNotification || name == kAXWindowResizedNotification
                 if isGeometry { me.onWindowGeometryChanged?() }
-                me.refresh()
+                if !isGeometry,
+                   let app = me.currentApp,
+                   app.processIdentifier == me.observedPID,
+                   let info = me.readWindow(element, app: app) {
+                    me.publish(info)
+                } else {
+                    me.refresh()
+                }
             }
         }
         if AXObserverCreate(pid, cb, &obs) == .success, let obs {
@@ -102,7 +131,10 @@ final class WindowTracker {
     }
 
     func refresh() {
-        let info = readFocusedWindow()
+        publish(readFocusedWindow())
+    }
+
+    private func publish(_ info: FocusedWindowInfo?) {
         if info != lastInfo {
             lastInfo = info
             onFocusedWindowChanged?(info)
@@ -122,39 +154,51 @@ final class WindowTracker {
         let axWin = win as! AXUIElement
         AXUIElementSetMessagingTimeout(axWin, 0.4)
 
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(axWin, kAXPositionAttribute as CFString, &posRef)
-        AXUIElementCopyAttributeValue(axWin, kAXSizeAttribute as CFString, &sizeRef)
-        var pos = CGPoint.zero
-        var size = CGSize.zero
-        if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pos) }
-        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize, &size) }
-        let frame = CGRect(origin: pos, size: size)
-
-        var winNum: CGWindowID?
-        var idRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axWin, "_AXWindowID" as CFString, &idRef) == .success,
-           let n = idRef as? NSNumber {
-            winNum = CGWindowID(n.uint32Value)
-        }
-
-        let allFrames = listAllWindowFrames(pid: pid)
-        return FocusedWindowInfo(pid: pid, bundleID: app.bundleIdentifier,
-                                 frame: frame, windowNumber: winNum, allAppFrames: allFrames)
+        return readWindow(axWin, app: app)
     }
 
-    private func listAllWindowFrames(pid: pid_t) -> [CGRect] {
-        let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let arr = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return [] }
-        var out: [CGRect] = []
-        for d in arr {
-            guard let p = d[kCGWindowOwnerPID as String] as? pid_t, p == pid else { continue }
-            guard let b = d[kCGWindowBounds as String] as? [String: Any],
-                  let r = CGRect(dictionaryRepresentation: b as CFDictionary) else { continue }
-            if r.width < 40 || r.height < 40 { continue }
-            out.append(r)
+    private func readWindow(_ axWin: AXUIElement, app: NSRunningApplication) -> FocusedWindowInfo? {
+        let windowNumber = Self.windowID(for: axWin)
+        guard let frame = Self.frame(for: axWin) else { return nil }
+
+        return FocusedWindowInfo(
+            pid: app.processIdentifier,
+            bundleID: app.bundleIdentifier,
+            frame: frame,
+            windowNumber: windowNumber
+        )
+    }
+
+    private nonisolated static func windowID(for window: AXUIElement) -> CGWindowID? {
+        if let axUIElementGetWindow {
+            var windowID: UInt32 = 0
+            if axUIElementGetWindow(window, &windowID) == .success, windowID > 0 {
+                return CGWindowID(windowID)
+            }
         }
-        return out
+
+        var idRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, "_AXWindowID" as CFString, &idRef) == .success,
+           let number = idRef as? NSNumber {
+            return CGWindowID(number.uint32Value)
+        }
+        return nil
+    }
+
+    private nonisolated static func frame(for window: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posRef,
+              let sizeRef else { return nil }
+
+        var pos = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
+              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size),
+              size.width > 0,
+              size.height > 0 else { return nil }
+        return CGRect(origin: pos, size: size)
     }
 }
