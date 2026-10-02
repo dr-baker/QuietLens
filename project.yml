@@ -15,7 +15,6 @@ settings:
     INFOPLIST_KEY_CFBundleDisplayName: Quiet Lens
     INFOPLIST_KEY_CFBundleName: Quiet Lens
     PRODUCT_NAME: Quiet Lens
-    INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
     # Xcode 15+ recommended settings
     CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED: YES
     CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER: YES
@@ -46,6 +45,7 @@ targets:
     info:
       path: QuietLens/Resources/Info.plist
       properties:
+        LSApplicationCategoryType: "public.app-category.productivity"
         LSUIElement: true
         LSBackgroundOnly: false
         NSHumanReadableCopyright: "Copyright © 2026 Quiet"

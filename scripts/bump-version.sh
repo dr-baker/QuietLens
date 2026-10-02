@@ -1,40 +1,32 @@
 #!/usr/bin/env bash
-# Bump app version in one place. Propagates to:
-#   - project.yml  (MARKETING_VERSION + CURRENT_PROJECT_VERSION)
-#   - Info.plist   (auto via $(MARKETING_VERSION) substitution at build time)
-#   - About screen (auto via Bundle.main.infoDictionary)
-#   - Casks/quietlens.rb (version line)
-#
-# Usage:
-#   bash scripts/bump-version.sh 1.0.4         # bumps build by +1 automatically
-#   bash scripts/bump-version.sh 1.0.4 7       # explicit build number
-#
-# After bumping, run `xcodegen generate` (this script does it for you).
+# Update the fork's version source and regenerate the Xcode project.
+# The inherited Homebrew cask still targets upstream and is left unchanged.
 set -euo pipefail
 
-VERSION="${1:?usage: bump-version.sh VERSION [BUILD]}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-YML="$ROOT/project.yml"
-CASK="$ROOT/Casks/quietlens.rb"
+version="${1:?Usage: bash scripts/bump-version.sh VERSION [BUILD]}"
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+project="$repo_dir/project.yml"
 
-current_build=$(grep -E '^\s*CURRENT_PROJECT_VERSION:' "$YML" | sed -E 's/.*"([0-9]+)".*/\1/')
-BUILD="${2:-$((current_build + 1))}"
+if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "Version must contain three numeric components, for example 1.0.9." >&2
+  exit 2
+fi
+current_build="$(sed -n 's/^    CURRENT_PROJECT_VERSION: "\([0-9]*\)"$/\1/p' "$project")"
+if [[ ! "$current_build" =~ ^[1-9][0-9]*$ ]]; then
+  echo "project.yml must contain a positive CURRENT_PROJECT_VERSION." >&2
+  exit 2
+fi
+build="${2:-$((current_build + 1))}"
+if [[ ! "$build" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Build must be a positive integer." >&2
+  exit 2
+fi
+command -v xcodegen >/dev/null
 
-# Update project.yml
-/usr/bin/sed -i '' -E "s/(MARKETING_VERSION:[[:space:]]*\")[^\"]+\"/\1${VERSION}\"/" "$YML"
-/usr/bin/sed -i '' -E "s/(CURRENT_PROJECT_VERSION:[[:space:]]*\")[^\"]+\"/\1${BUILD}\"/" "$YML"
+/usr/bin/sed -i '' -E "s/(MARKETING_VERSION:[[:space:]]*\")[^\"]+\"/\1${version}\"/" "$project"
+/usr/bin/sed -i '' -E "s/(CURRENT_PROJECT_VERSION:[[:space:]]*\")[^\"]+\"/\1${build}\"/" "$project"
 
-# Update Cask (reset sha256 so release.sh can re-pin it)
-/usr/bin/sed -i '' -E "s/^(  version )\".*\"/\1\"${VERSION}\"/" "$CASK"
-/usr/bin/sed -i '' -E 's/^(  sha256 ).*/\1:no_check  # set by scripts\/release.sh output/' "$CASK"
+(cd "$repo_dir" && xcodegen generate)
 
-# Regenerate Xcode project so the new version takes effect
-(cd "$ROOT" && xcodegen generate >/dev/null)
-
-echo "Bumped to ${VERSION} (build ${BUILD})."
-echo "  project.yml:       MARKETING_VERSION=${VERSION}, CURRENT_PROJECT_VERSION=${BUILD}"
-echo "  Casks/quietlens.rb: version=\"${VERSION}\" (sha256 reset)"
-echo
-echo "Next:"
-echo "  bash scripts/release.sh ${VERSION}"
-echo "  # then paste the new sha256 into Casks/quietlens.rb"
+echo "Bumped to $version (build $build)."
+echo "After verification: bash scripts/release.sh $version"
