@@ -388,7 +388,8 @@ final class OverlayManager {
             return
         }
         let perScreen = computePerScreenWindows()
-        var allIDs = Set<CGWindowID>()
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        var owners: [CGWindowID: pid_t] = [:]
         for (id, w) in windows {
             guard NSScreen.screens.first(where: { screenID($0) == id }) != nil else { continue }
             let overlayRect = w.frame
@@ -400,59 +401,41 @@ final class OverlayManager {
                               y: inter.minY - overlayRect.minY,
                               width: inter.width, height: inter.height)
             }
-            for e in entries where e.windowID != 0 { allIDs.insert(e.windowID) }
+            // Carry ownership from the selection scan. Our settings and
+            // onboarding windows must never be raised above the overlay.
+            for entry in entries where entry.windowID != 0 && entry.pid != ourPID {
+                owners[entry.windowID] = entry.pid
+            }
             w.setCutouts(
                 cutouts,
                 duration: animated ? settings.fadeDuration : 0,
                 cornerRadii: focusedCornerRadii ?? CutoutView.standardWindowCornerRadii
             )
         }
-        // Never raise our own windows (Settings / Onboarding). Otherwise every
-        // refresh re-raises them to screenSaver level, which on macOS flashes
-        // them forward in the z-order — visible as Settings popping in and
-        // out on every shake.
-        let ourPID = ProcessInfo.processInfo.processIdentifier
-        if !allIDs.isEmpty,
-           let arr = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
-            for d in arr {
-                guard let pid = d[kCGWindowOwnerPID as String] as? pid_t, pid == ourPID,
-                      let wid = d[kCGWindowNumber as String] as? CGWindowID else { continue }
-                allIDs.remove(wid)
-            }
-        }
         let raiseLevel = Int32(CGWindowLevelForKey(.screenSaverWindow))
-        WindowRaiser.shared.setRaised(allIDs, level: raiseLevel)
+        WindowRaiser.shared.setRaised(owners, level: raiseLevel)
     }
 
-    struct WindowEntry {
-        let windowID: CGWindowID
-        let rect: CGRect
-        var pid: pid_t = 0
-    }
-
-    private func computePerScreenWindows() -> [CGDirectDisplayID: [WindowEntry]] {
+    private func computePerScreenWindows() -> [CGDirectDisplayID: [FocusWindowCandidate]] {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let arr = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return [:] }
 
-        struct CGEntry {
-            let windowID: CGWindowID
-            let pid: pid_t
-            let rect: CGRect
-        }
-        var entries: [CGEntry] = []
+        var entries: [FocusWindowCandidate] = []
         for d in arr {
+            guard let pid = d[kCGWindowOwnerPID as String] as? pid_t else { continue }
+            let wid = (d[kCGWindowNumber as String] as? CGWindowID) ?? 0
             let layer = (d[kCGWindowLayer as String] as? Int) ?? 0
-            if layer > 0 { continue }
+            guard FocusWindowSelection.includesWindow(
+                layer: layer, isRaised: WindowRaiser.shared.isRaised(windowID: wid, ownerPID: pid)
+            ) else { continue }
             let onScreen = (d[kCGWindowIsOnscreen as String] as? Bool) ?? true
             if !onScreen { continue }
-            guard let pid = d[kCGWindowOwnerPID as String] as? pid_t else { continue }
             guard let b = d[kCGWindowBounds as String] as? [String: Any],
                   let r = CGRect(dictionaryRepresentation: b as CFDictionary) else { continue }
             let alpha = (d[kCGWindowAlpha as String] as? Double) ?? 1.0
             if alpha < 0.05 { continue }
             if r.width < 40 || r.height < 30 { continue }
-            let wid = (d[kCGWindowNumber as String] as? CGWindowID) ?? 0
-            entries.append(CGEntry(windowID: wid, pid: pid, rect: cgToCocoa(r)))
+            entries.append(FocusWindowCandidate(windowID: wid, pid: pid, rect: cgToCocoa(r)))
         }
 
         let ourPID = ProcessInfo.processInfo.processIdentifier
@@ -465,71 +448,16 @@ final class OverlayManager {
                 return app.processIdentifier
             })
         }()
-        var out: [CGDirectDisplayID: [WindowEntry]] = [:]
-
-        for screen in NSScreen.screens {
-            let id = screenID(screen)
-            let sf = screen.frame
-            var picked: [WindowEntry] = []
-
-            for e in entries where pinnedPIDs.contains(e.pid) && e.rect.intersects(sf) {
-                picked.append(WindowEntry(windowID: e.windowID, rect: e.rect))
-            }
-
-            if settings.highlightSameAppWindows {
-                for e in entries where e.pid == frontPID {
-                    if e.rect.intersects(sf) && !picked.contains(where: { rectsApproxEqual($0.rect, e.rect) }) {
-                        picked.append(WindowEntry(windowID: e.windowID, rect: e.rect))
-                    }
-                }
-                if let ax = focused?.frame, focused?.pid == frontPID {
-                    let cocoa = axToCocoa(ax)
-                    if cocoa.intersects(sf) && !picked.contains(where: { rectsApproxEqual($0.rect, cocoa) }) {
-                        let wid = focused?.windowNumber ?? 0
-                        picked.append(WindowEntry(windowID: wid, rect: cocoa))
-                    }
-                }
-                if picked.isEmpty, let top = entries.first(where: { $0.pid != ourPID && $0.rect.intersects(sf) }) {
-                    picked.append(WindowEntry(windowID: top.windowID, rect: top.rect))
-                }
-            } else {
-                if let windowID = focused?.windowNumber,
-                   focused?.pid == frontPID,
-                   let exact = entries.first(where: { $0.windowID == windowID && $0.rect.intersects(sf) }) {
-                    if !picked.contains(where: { $0.windowID == exact.windowID }) {
-                        picked.append(WindowEntry(windowID: exact.windowID, rect: exact.rect))
-                    }
-                }
-                if picked.isEmpty, let ax = focused?.frame, focused?.pid == frontPID {
-                    let cocoa = axToCocoa(ax)
-                    if cocoa.intersects(sf) {
-                        let wid = focused?.windowNumber ?? entries.first(where: { $0.pid == frontPID && rectsApproxEqual($0.rect, cocoa) })?.windowID ?? 0
-                        picked.append(WindowEntry(windowID: wid, rect: cocoa))
-                    }
-                }
-                if picked.isEmpty,
-                   let top = entries.first(where: { $0.pid == frontPID && $0.rect.intersects(sf) }) {
-                    picked.append(WindowEntry(windowID: top.windowID, rect: top.rect))
-                }
-                if picked.isEmpty,
-                   let any = entries.first(where: { $0.pid != ourPID && $0.rect.intersects(sf) }) {
-                    picked.append(WindowEntry(windowID: any.windowID, rect: any.rect))
-                }
-            }
-            out[id] = picked
+        let focus = focused.map {
+            FocusWindowCandidate(windowID: $0.windowNumber ?? 0, pid: $0.pid, rect: cgToCocoa($0.frame))
         }
-        return out
-    }
-
-    private func axToCocoa(_ r: CGRect) -> CGRect {
-        guard let primary = NSScreen.screens.first else { return r }
-        let topY = primary.frame.maxY
-        return CGRect(x: r.origin.x, y: topY - r.origin.y - r.size.height, width: r.size.width, height: r.size.height)
-    }
-
-    private func rectsApproxEqual(_ a: CGRect, _ b: CGRect) -> Bool {
-        abs(a.minX - b.minX) < 4 && abs(a.minY - b.minY) < 4 &&
-        abs(a.width - b.width) < 4 && abs(a.height - b.height) < 4
+        return Dictionary(uniqueKeysWithValues: NSScreen.screens.map { screen in
+            (screenID(screen), FocusWindowSelection.select(
+                entries: entries, screen: screen.frame, focused: focus, frontPID: frontPID,
+                pinnedPIDs: pinnedPIDs, highlightSameAppWindows: settings.highlightSameAppWindows,
+                ourPID: ourPID
+            ))
+        })
     }
 
     private func cgToCocoa(_ r: CGRect) -> CGRect {
