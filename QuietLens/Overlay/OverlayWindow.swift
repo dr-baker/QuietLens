@@ -38,8 +38,12 @@ final class OverlayWindow: NSWindow {
                              radius: CGFloat(settings.edgeGlowRadius))
     }
 
-    func setCutouts(_ rects: [CGRect], duration: TimeInterval) {
-        cutoutView.setCutouts(rects, duration: duration)
+    func setCutouts(
+        _ rects: [CGRect],
+        duration: TimeInterval,
+        cornerRadii: WindowCornerRadii = CutoutView.standardWindowCornerRadii
+    ) {
+        cutoutView.setCutouts(rects, duration: duration, cornerRadii: cornerRadii)
     }
 
     func fadeIn(duration: TimeInterval) {

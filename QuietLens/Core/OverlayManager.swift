@@ -8,6 +8,11 @@ final class OverlayManager {
     private var isExcluded: Bool = false
     private var isPeeking: Bool = false
     private var isDragging: Bool = false
+    private var overviewPhase: OverviewDetector.Phase = .inactive
+    private var overviewExitTimer: Timer?
+    private var overviewExitWindowID: CGWindowID?
+    private var overviewExitCornerRadii: WindowCornerRadii?
+    private var focusedCornerRadii: WindowCornerRadii?
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
 
@@ -20,6 +25,9 @@ final class OverlayManager {
     private var windows: [CGDirectDisplayID: OverlayWindow] = [:]
     private let settings: QuietLensSettings
     private var focused: FocusedWindowInfo?
+    private lazy var overviewDetector = OverviewDetector { [weak self] phase in
+        self?.setOverviewPhase(phase)
+    }
 
     init(settings: QuietLensSettings) {
         self.settings = settings
@@ -35,6 +43,11 @@ final class OverlayManager {
         if on {
             isDragging = false
             isPeeking = false
+            overviewDetector.start()
+        } else {
+            overviewDetector.stop()
+            overviewPhase = .inactive
+            stopOverviewExitTracking()
         }
         updateVisibility(animated: animated)
         if changed { onEnabledChanged?(on) }
@@ -52,8 +65,16 @@ final class OverlayManager {
     }
 
     func updateFocus(_ info: FocusedWindowInfo?, excluded: Bool, animated: Bool) {
+        if info != nil {
+            overviewDetector.noteSelectionStarted()
+        }
         focused = info
+        resolveFocusedCornerRadii(info)
         isExcluded = excluded
+        if overviewPhase == .exiting, let windowID = info?.windowNumber {
+            setOverviewExitWindow(windowID)
+            refreshOverviewExitCutout()
+        }
 
         let visible = shouldBeVisible()
         if visible != isVisible {
@@ -79,6 +100,26 @@ final class OverlayManager {
 
     func refreshFocusLayout() {
         refreshCutouts(animated: false)
+    }
+
+    private func setOverviewPhase(_ phase: OverviewDetector.Phase) {
+        guard overviewPhase != phase else { return }
+        overviewPhase = phase
+
+        switch phase {
+        case .active:
+            stopOverviewExitTracking()
+            updateVisibility(animated: false)
+        case .exiting:
+            showOverviewExitEffect()
+        case .inactive:
+            stopOverviewExitTracking()
+            if shouldBeVisible(), isVisible {
+                refreshCutouts(animated: false)
+            } else {
+                updateVisibility(animated: false)
+            }
+        }
     }
 
     @objc private func screensChanged() {
@@ -157,7 +198,115 @@ final class OverlayManager {
         if isExcluded { return false }
         if isPeeking { return false }
         if isDragging { return false }
+        if overviewPhase == .active { return false }
         return true
+    }
+
+    private func showOverviewExitEffect() {
+        guard shouldBeVisible() else {
+            updateVisibility(animated: false)
+            return
+        }
+
+        isVisible = true
+        ensureWindows()
+        WindowRaiser.shared.clearAll()
+        if let selectionLocation = overviewDetector.exitSelectionLocation {
+            setOverviewExitWindow(WindowPresentationReader.shared.windowID(
+                at: selectionLocation,
+                excludingPID: ProcessInfo.processInfo.processIdentifier
+            ))
+        } else {
+            setOverviewExitWindow(focused?.windowNumber)
+        }
+        for (_, window) in windows {
+            window.setCutouts([], duration: 0)
+            window.fadeIn(duration: OverviewDetector.exitBlendDuration)
+        }
+        refreshOverviewExitCutout()
+        startOverviewExitTracking()
+    }
+
+    private func startOverviewExitTracking() {
+        overviewExitTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshOverviewExitCutout() }
+        }
+        timer.tolerance = 0.001
+        RunLoop.main.add(timer, forMode: .common)
+        overviewExitTimer = timer
+    }
+
+    private func stopOverviewExitTracking() {
+        overviewExitTimer?.invalidate()
+        overviewExitTimer = nil
+        overviewExitWindowID = nil
+        overviewExitCornerRadii = nil
+    }
+
+    private func refreshOverviewExitCutout() {
+        guard overviewPhase == .exiting,
+              let windowID = overviewExitWindowID,
+              let presentation = WindowPresentationReader.shared.presentation(for: windowID) else {
+            return
+        }
+
+        let cocoaFrame = cgToCocoa(presentation.frame)
+        let cornerRadii = (overviewExitCornerRadii ?? CutoutView.standardWindowCornerRadii)
+            .scaled(by: presentation.scale)
+        for (_, window) in windows {
+            let intersection = cocoaFrame.intersection(window.frame)
+            let cutouts: [CGRect]
+            if intersection.isNull || intersection.isEmpty {
+                cutouts = []
+            } else {
+                cutouts = [CGRect(
+                    x: intersection.minX - window.frame.minX,
+                    y: intersection.minY - window.frame.minY,
+                    width: intersection.width,
+                    height: intersection.height
+                )]
+            }
+            window.setCutouts(cutouts, duration: 0, cornerRadii: cornerRadii)
+        }
+    }
+
+    private func resolveFocusedCornerRadii(_ info: FocusedWindowInfo?) {
+        guard let windowID = info?.windowNumber else {
+            focusedCornerRadii = nil
+            return
+        }
+        focusedCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        guard focusedCornerRadii == nil else { return }
+
+        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
+            guard let self, self.focused?.windowNumber == windowID else { return }
+            self.focusedCornerRadii = radii
+            if self.overviewPhase == .exiting, self.overviewExitWindowID == windowID {
+                self.overviewExitCornerRadii = radii
+                self.refreshOverviewExitCutout()
+            } else {
+                self.refreshCutouts(animated: false)
+            }
+        }
+    }
+
+    private func setOverviewExitWindow(_ windowID: CGWindowID?) {
+        overviewExitWindowID = windowID
+        guard let windowID else {
+            overviewExitCornerRadii = nil
+            return
+        }
+        overviewExitCornerRadii = WindowCornerReader.shared.cachedRadii(for: windowID)
+        guard overviewExitCornerRadii == nil else { return }
+
+        WindowCornerReader.shared.resolve(windowID: windowID) { [weak self] radii in
+            guard let self,
+                  self.overviewPhase == .exiting,
+                  self.overviewExitWindowID == windowID else { return }
+            self.overviewExitCornerRadii = radii
+            self.refreshOverviewExitCutout()
+        }
     }
 
     private func updateVisibility(animated: Bool) {
@@ -233,6 +382,11 @@ final class OverlayManager {
             WindowRaiser.shared.clearAll()
             return
         }
+        if overviewPhase == .exiting {
+            WindowRaiser.shared.clearAll()
+            refreshOverviewExitCutout()
+            return
+        }
         let perScreen = computePerScreenWindows()
         var allIDs = Set<CGWindowID>()
         for (id, w) in windows {
@@ -247,7 +401,11 @@ final class OverlayManager {
                               width: inter.width, height: inter.height)
             }
             for e in entries where e.windowID != 0 { allIDs.insert(e.windowID) }
-            w.setCutouts(cutouts, duration: animated ? settings.fadeDuration : 0)
+            w.setCutouts(
+                cutouts,
+                duration: animated ? settings.fadeDuration : 0,
+                cornerRadii: focusedCornerRadii ?? CutoutView.standardWindowCornerRadii
+            )
         }
         // Never raise our own windows (Settings / Onboarding). Otherwise every
         // refresh re-raises them to screenSaver level, which on macOS flashes
