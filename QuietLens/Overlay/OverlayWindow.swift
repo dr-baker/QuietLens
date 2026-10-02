@@ -4,8 +4,9 @@ import QuartzCore
 final class OverlayWindow: NSWindow {
     private let blurView: BlurOverlayView
     private let cutoutView: CutoutView
+    private var fadeState = OverlayFadeState()
 
-    init(screen: NSScreen, frame: NSRect) {
+    init(frame: NSRect) {
         blurView = BlurOverlayView(frame: NSRect(origin: .zero, size: frame.size))
         cutoutView = CutoutView(frame: NSRect(origin: .zero, size: frame.size))
         super.init(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -47,37 +48,30 @@ final class OverlayWindow: NSWindow {
     }
 
     func fadeIn(duration: TimeInterval) {
-        orderFrontRegardless()
-        // Always nuke any lingering fadeOut animation. fadeOut uses
-        // fillMode=.forwards + isRemovedOnCompletion=false so it can keep
-        // the layer at opacity 0 across the orderOut. If we don't remove
-        // it here, fadeIn's 0→1 animation runs, finishes, gets removed,
-        // and the stuck fadeOut snaps the layer back to opacity 0 —
-        // overlay flashes on then disappears.
         let layer = contentView?.layer
+        if duration > 0, fadeState.isVisible,
+           layer?.animation(forKey: "fadeIn") != nil {
+            return
+        }
+        let wasFullyVisible = alphaValue >= 0.999 && (layer?.opacity ?? 0) >= 0.999
+            && layer?.animation(forKey: "fadeIn") == nil
+            && layer?.animation(forKey: "fadeOut") == nil
+        if wasFullyVisible, fadeState.isVisible { return }
+        let opacity = alphaValue > 0 ? (layer?.presentation()?.opacity ?? layer?.opacity ?? 0) : 0
+        _ = fadeState.begin(visible: true)
         layer?.removeAnimation(forKey: "fadeOut")
+        layer?.removeAnimation(forKey: "fadeIn")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         layer?.opacity = 1
-        // Idempotent: skip if already fully shown and no fadeIn animation
-        // is mid-flight.
-        if alphaValue >= 0.999 && layer?.animation(forKey: "fadeIn") == nil {
-            return
-        }
-        if duration <= 0 {
-            alphaValue = 1
-            return
-        }
-        // Set the final alpha immediately so the window is fully visible as
-        // soon as it joins the scene, then animate the fade via a
-        // layer-level CABasicAnimation. NSAnimationContext + window.animator
-        // only fires reliably for key/main windows; on an LSUIElement
-        // (.accessory) app whose window isn't key, the alpha animation
-        // doesn't tick until the window server gets some other event
-        // (e.g. clicking another app), which is why the overlay appeared
-        // invisible after a shake until the user clicked elsewhere.
+        CATransaction.commit()
         alphaValue = 1
-        guard let layer else { return }
+        orderFrontRegardless()
+        guard duration > 0, !wasFullyVisible, let layer else { return }
+        // Layer animation ticks independently of key-window events in this
+        // menu bar app. Continue from the visible opacity on interruption.
         let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0
+        fade.fromValue = opacity
         fade.toValue = 1
         fade.duration = duration
         fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -85,36 +79,35 @@ final class OverlayWindow: NSWindow {
     }
 
     func fadeOut(duration: TimeInterval) {
+        let generation = fadeState.begin(visible: false)
+        let layer = contentView?.layer
+        let opacity = alphaValue > 0 ? (layer?.presentation()?.opacity ?? layer?.opacity ?? 0) : 0
+        layer?.removeAnimation(forKey: "fadeIn")
+        layer?.removeAnimation(forKey: "fadeOut")
         if duration <= 0 {
-            contentView?.layer?.removeAnimation(forKey: "fadeIn")
-            contentView?.layer?.opacity = 0
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer?.opacity = 0
+            CATransaction.commit()
             alphaValue = 0
             orderOut(nil)
             return
         }
-        guard let layer = contentView?.layer else {
+        guard let layer else {
             alphaValue = 0
             orderOut(nil)
             return
         }
-        layer.removeAnimation(forKey: "fadeIn")
         let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 1
+        fade.fromValue = opacity
         fade.toValue = 0
         fade.duration = duration
         fade.timingFunction = CAMediaTimingFunction(name: .easeIn)
-        // Hold opacity at 0 between when the animation finishes and when our
-        // completion block runs, so the layer doesn't snap back to its
-        // model value (1) for one frame. fadeIn explicitly removes this
-        // animation and restores opacity=1 before doing its own fade, so
-        // the ghost-animation overriding fadeIn bug can't happen.
-        fade.fillMode = .forwards
-        fade.isRemovedOnCompletion = false
         CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.opacity = 0
         CATransaction.setCompletionBlock { [weak self] in
-            guard let self else { return }
-            self.contentView?.layer?.opacity = 0
-            self.contentView?.layer?.removeAnimation(forKey: "fadeOut")
+            guard let self, self.fadeState.canFinishHiding(generation: generation) else { return }
             self.alphaValue = 0
             self.orderOut(nil)
         }

@@ -17,6 +17,7 @@ final class OverlayManager {
     private var focusedCornerRadii: WindowCornerRadii?
     private var mouseButtonDown = false
     private var dragEndFailsafe: DispatchWorkItem?
+    private var dragMonitors: [Any] = []
 
     /// Fired whenever isEnabled flips, regardless of who flipped it (menu,
     /// hotkey, shake, URL automation, auto-disable). Lets AppDelegate keep
@@ -26,17 +27,31 @@ final class OverlayManager {
 
     private var windows: [CGDirectDisplayID: OverlayWindow] = [:]
     private let settings: QuietLensSettings
+    private let displays: () -> [OverlayDisplay]
+    private let windowInfo: (CGWindowListOption, CGWindowID) -> [[String: Any]]?
     private var focused: FocusedWindowInfo?
     private lazy var overviewDetector = OverviewDetector { [weak self] phase in
         self?.setOverviewPhase(phase)
     }
 
-    init(settings: QuietLensSettings) {
+    init(settings: QuietLensSettings,
+         displays: @escaping () -> [OverlayDisplay] = { NSScreen.screens.map(OverlayDisplay.init(screen:)) },
+         windowInfo: @escaping (CGWindowListOption, CGWindowID) -> [[String: Any]]? = {
+             CGWindowListCopyWindowInfo($0, $1) as? [[String: Any]]
+         }) {
         self.settings = settings
+        self.displays = displays
+        self.windowInfo = windowInfo
         NotificationCenter.default.addObserver(
             self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
         observeDrag()
+    }
+
+    deinit {
+        for monitor in dragMonitors { NSEvent.removeMonitor(monitor) }
+        dragEndFailsafe?.cancel()
+        overviewExitTimer?.invalidate()
     }
 
     func setEnabled(_ on: Bool, animated: Bool) {
@@ -92,8 +107,9 @@ final class OverlayManager {
     }
 
     func refreshGeometry() {
+        let screens = displays()
         for (id, w) in windows {
-            guard let screen = NSScreen.screens.first(where: { screenID($0) == id }) else { continue }
+            guard let screen = screens.first(where: { $0.id == id }) else { continue }
             w.setFrame(overlayFrame(for: screen), display: true)
         }
         refreshCutouts(animated: false)
@@ -115,34 +131,19 @@ final class OverlayManager {
             showOverviewExitEffect()
         case .inactive:
             stopOverviewExitTracking()
-            if shouldBeVisible(), isVisible {
-                refreshCutouts(animated: false)
-            } else {
-                updateVisibility(animated: false)
-            }
+            updateVisibility(animated: false)
         }
     }
 
     @objc private func screensChanged() {
-        // Avoid rebuilding the overlay windows here. didChangeScreenParameters
-        // fires for tiny visibleFrame changes too (e.g. when applyAutoHide
-        // toggles the menu-bar autoHide presentation option), and tearing
-        // the windows down + back up mid-fade caused a visible flash on
-        // every shake. Resize-in-place handles both monitor add/remove and
-        // visibleFrame changes; rebuildWindows happens lazily via
-        // ensureWindows() when the screen set actually differs.
-        let currentIDs = Set(windows.keys)
-        let newIDs = Set(NSScreen.screens.map { screenID($0) })
-        if currentIDs != newIDs {
-            rebuildWindows()
-        } else {
-            for screen in NSScreen.screens {
-                if let w = windows[screenID(screen)] {
-                    w.setFrame(overlayFrame(for: screen), display: true)
-                }
-            }
-        }
+        // Preserve unaffected windows and their fade state. New windows start
+        // transparent, and receive their masks before joining a visible effect.
+        let addedIDs = reconcileWindows()
+        if overviewPhase == .exiting { setOverviewExitWindow(overviewExitWindowID) }
         refreshCutouts(animated: false)
+        if isVisible, overviewPhase != .exiting {
+            for id in addedIDs { windows[id]?.fadeIn(duration: 0) }
+        }
     }
 
     private func observeDrag() {
@@ -151,20 +152,20 @@ final class OverlayManager {
         // via noteWindowGeometryChanging() — not on every left-drag.
         // Hiding on any drag made the overlay flicker during plain text
         // selection in the focused window.
-        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown], handler: { [weak self] _ in
             Task { @MainActor in self?.mouseButtonDown = true }
-        }
-        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
+        }) { dragMonitors.append(monitor) }
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp], handler: { [weak self] _ in
             Task { @MainActor in self?.endDrag() }
-        }
-        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] ev in
+        }) { dragMonitors.append(monitor) }
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown], handler: { [weak self] ev in
             Task { @MainActor in self?.mouseButtonDown = true }
             return ev
-        }
-        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] ev in
+        }) { dragMonitors.append(monitor) }
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp], handler: { [weak self] ev in
             Task { @MainActor in self?.endDrag() }
             return ev
-        }
+        }) { dragMonitors.append(monitor) }
     }
 
     /// Called by WindowTracker on kAXWindowMoved / kAXWindowResized.
@@ -220,10 +221,6 @@ final class OverlayManager {
         } else {
             setOverviewExitWindow(focused?.windowNumber)
         }
-        for (_, window) in windows {
-            window.setCutouts([], duration: 0)
-            window.fadeIn(duration: OverviewDetector.exitBlendDuration)
-        }
         refreshOverviewExitCutout()
         startOverviewExitTracking()
     }
@@ -247,9 +244,15 @@ final class OverlayManager {
     }
 
     private func refreshOverviewExitCutout() {
-        guard overviewPhase == .exiting,
-              let windowID = overviewExitWindowID,
+        guard overviewPhase == .exiting else { return }
+        guard shouldBeVisible(), let windowID = overviewExitWindowID,
               let presentation = WindowPresentationReader.shared.presentation(for: windowID) else {
+            // A missing presentation must not leave a hole at the last sample.
+            // Resume only after a valid frame, with its cutout installed first.
+            for window in windows.values {
+                window.setCutouts([], duration: 0)
+                window.fadeOut(duration: 0)
+            }
             return
         }
 
@@ -259,6 +262,7 @@ final class OverlayManager {
         for (_, window) in windows {
             let cutouts = CutoutGeometry.localRect(for: cocoaFrame, overlay: window.frame).map { [$0] } ?? []
             window.setCutouts(cutouts, duration: 0, cornerRadii: cornerRadii)
+            window.fadeIn(duration: OverviewDetector.exitBlendDuration)
         }
     }
 
@@ -312,7 +316,7 @@ final class OverlayManager {
         if let focused, focused.windowNumber == windowID {
             return cornerFingerprint(ownerPID: focused.pid, frame: focused.frame)
         }
-        guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+        guard let list = windowInfo(.optionIncludingWindow, windowID),
               let window = list.first(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == windowID }),
               let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
               let bounds = window[kCGWindowBounds as String] as? [String: Any],
@@ -322,13 +326,13 @@ final class OverlayManager {
 
     private func cornerFingerprint(ownerPID: pid_t, frame: CGRect) -> WindowCornerFingerprint {
         let cocoaFrame = cgToCocoa(frame)
-        let screen = NSScreen.screens.max {
+        let screen = displays().max {
             let first = $0.frame.intersection(cocoaFrame)
             let second = $1.frame.intersection(cocoaFrame)
             return first.width * first.height < second.width * second.height
         }
         return WindowCornerFingerprint(
-            ownerPID: ownerPID, logicalSize: frame.size, displayScale: screen?.backingScaleFactor ?? 1
+            ownerPID: ownerPID, logicalSize: frame.size, displayScale: screen?.scale ?? 1
         )
     }
 
@@ -336,6 +340,15 @@ final class OverlayManager {
         let visible = shouldBeVisible()
         isVisible = visible
         if visible {
+            if overviewPhase == .exiting {
+                if overviewExitTimer == nil {
+                    showOverviewExitEffect()
+                } else {
+                    ensureWindows()
+                    refreshOverviewExitCutout()
+                }
+                return
+            }
             ensureWindows()
             // Apply cutouts BEFORE fading in. Otherwise the user sees a
             // full-screen blur for one frame, then the focused-window
@@ -353,25 +366,32 @@ final class OverlayManager {
     }
 
     private func ensureWindows() {
-        if windows.isEmpty { rebuildWindows() }
+        if windows.isEmpty { _ = reconcileWindows() }
     }
 
-    private func rebuildWindows() {
-        for (_, w) in windows { w.orderOut(nil) }
-        windows.removeAll()
-        for screen in NSScreen.screens {
-            let frame = overlayFrame(for: screen)
-            let w = OverlayWindow(screen: screen, frame: frame)
-            w.applyAppearance(settings: settings)
-            windows[screenID(screen)] = w
+    private func reconcileWindows() -> Set<CGDirectDisplayID> {
+        let screens = displays()
+        let retiredIDs = Set(windows.keys).subtracting(screens.map(\.id))
+        for id in retiredIDs {
+            windows.removeValue(forKey: id)?.orderOut(nil)
         }
+        var addedIDs = Set<CGDirectDisplayID>()
+        for screen in screens {
+            let id = screen.id
+            let frame = overlayFrame(for: screen)
+            if let window = windows[id] {
+                if window.frame != frame { window.setFrame(frame, display: true) }
+            } else {
+                let window = OverlayWindow(frame: frame)
+                window.applyAppearance(settings: settings)
+                windows[id] = window
+                addedIDs.insert(id)
+            }
+        }
+        return addedIDs
     }
 
-    private func screenID(_ s: NSScreen) -> CGDirectDisplayID {
-        (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-    }
-
-    private func overlayFrame(for screen: NSScreen) -> NSRect {
+    private func overlayFrame(for screen: OverlayDisplay) -> NSRect {
         let full = screen.frame
         let vis = screen.visibleFrame
         var rect = full
@@ -412,10 +432,11 @@ final class OverlayManager {
         }
         resolveFocusedCornerRadii(focused)
         let perScreen = computePerScreenWindows()
+        let displayIDs = Set(displays().map(\.id))
         let ourPID = ProcessInfo.processInfo.processIdentifier
         var owners: [CGWindowID: pid_t] = [:]
         for (id, w) in windows {
-            guard NSScreen.screens.first(where: { screenID($0) == id }) != nil else { continue }
+            guard displayIDs.contains(id) else { continue }
             let overlayRect = w.frame
             let entries = perScreen[id] ?? []
             let cutouts = entries.compactMap { entry -> CGRect? in
@@ -438,7 +459,7 @@ final class OverlayManager {
 
     private func computePerScreenWindows() -> [CGDirectDisplayID: [FocusWindowCandidate]] {
         let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let arr = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else { return [:] }
+        guard let arr = windowInfo(opts, kCGNullWindowID) else { return [:] }
 
         var entries: [FocusWindowCandidate] = []
         for d in arr {
@@ -471,8 +492,8 @@ final class OverlayManager {
         let focus = focused.map {
             FocusWindowCandidate(windowID: $0.windowNumber ?? 0, pid: $0.pid, rect: cgToCocoa($0.frame))
         }
-        return Dictionary(uniqueKeysWithValues: NSScreen.screens.map { screen in
-            (screenID(screen), FocusWindowSelection.select(
+        return Dictionary(uniqueKeysWithValues: displays().map { screen in
+            (screen.id, FocusWindowSelection.select(
                 entries: entries, screen: screen.frame, focused: focus, frontPID: frontPID,
                 pinnedPIDs: pinnedPIDs, highlightSameAppWindows: settings.highlightSameAppWindows,
                 ourPID: ourPID
@@ -481,7 +502,7 @@ final class OverlayManager {
     }
 
     private func cgToCocoa(_ r: CGRect) -> CGRect {
-        guard let primary = NSScreen.screens.first else { return r }
+        guard let primary = displays().first else { return r }
         let topY = primary.frame.maxY
         return CGRect(x: r.origin.x, y: topY - r.origin.y - r.size.height, width: r.size.width, height: r.size.height)
     }
