@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var settingsWindow: NSWindow?
     private var onboardingWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
+    private var committedSettingsEffects: [CommittedSettingsEffect] = []
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -179,17 +180,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
             .sink { [weak self] _ in self?.overlayManager.refreshGeometry() }
             .store(in: &cancellables)
 
-        s.$excludedBundleIDs
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] _ in self?.applyCurrentExclusion() }
-            .store(in: &cancellables)
+        committedSettingsEffects = [
+            CommittedSettingsEffect(
+                changes: s.$excludedBundleIDs.removeDuplicates().dropFirst(),
+                perform: { [weak self] in self?.applyCurrentExclusion() }
+            ),
+            CommittedSettingsEffect(
+                changes: Publishers.CombineLatest(s.$pinnedBundleIDs.removeDuplicates(),
+                                                 s.$highlightSameAppWindows.removeDuplicates()).dropFirst(),
+                perform: { [weak self] in self?.overlayManager.refreshFocusLayout() }
+            )
+        ]
 
-        Publishers.CombineLatest(s.$pinnedBundleIDs.removeDuplicates(),
-                                 s.$highlightSameAppWindows.removeDuplicates())
-            .dropFirst()
-            .sink { [weak self] _ in self?.overlayManager.refreshFocusLayout() }
-            .store(in: &cancellables)
         // iCloud push is debounced separately and much more loosely — the
         // 60ms cadence above fires on every slider tick, and each push hits
         // NSUbiquitousKeyValueStore.synchronize().
@@ -400,7 +402,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         var list = QuietLensSettings.shared.excludedBundleIDs
         if let idx = list.firstIndex(of: id) { list.remove(at: idx) } else { list.append(id) }
         QuietLensSettings.shared.excludedBundleIDs = list
-        applyCurrentExclusion()
     }
 
     @MainActor
