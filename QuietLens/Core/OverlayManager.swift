@@ -496,7 +496,9 @@ final class OverlayManager {
                 if let windowID = focused?.windowNumber,
                    focused?.pid == frontPID,
                    let exact = entries.first(where: { $0.windowID == windowID && $0.rect.intersects(sf) }) {
-                    picked.append(WindowEntry(windowID: exact.windowID, rect: exact.rect))
+                    if !picked.contains(where: { $0.windowID == exact.windowID }) {
+                        picked.append(WindowEntry(windowID: exact.windowID, rect: exact.rect))
+                    }
                 }
                 if picked.isEmpty, let ax = focused?.frame, focused?.pid == frontPID {
                     let cocoa = axToCocoa(ax)
