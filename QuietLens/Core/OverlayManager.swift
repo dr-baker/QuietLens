@@ -45,6 +45,9 @@ final class OverlayManager {
         NotificationCenter.default.addObserver(
             self, selector: #selector(screensChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(accessibilityDisplayOptionsChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         observeDrag()
     }
 
@@ -104,6 +107,10 @@ final class OverlayManager {
 
     func refreshAppearance() {
         for (_, w) in windows { w.applyAppearance(settings: settings) }
+    }
+
+    @objc private func accessibilityDisplayOptionsChanged() {
+        refreshAppearance()
     }
 
     func refreshGeometry() {

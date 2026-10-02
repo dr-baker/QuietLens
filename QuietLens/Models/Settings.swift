@@ -113,12 +113,6 @@ enum BackdropMode: String, CaseIterable, Identifiable {
     }
 }
 
-enum ShaderMode: String, CaseIterable, Identifiable {
-    case staticMode = "static", breathing, drift, pulse
-    var id: String { rawValue }
-    var label: String { rawValue.capitalized }
-}
-
 enum ShakeModifier: String, CaseIterable, Identifiable {
     case none, shift, option, command
     var id: String { rawValue }

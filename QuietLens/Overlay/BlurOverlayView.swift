@@ -9,6 +9,7 @@ final class BlurOverlayView: NSView {
     private let gradientLayer = CAGradientLayer()
     private let grainLayer = CALayer()
     private let backdropLayer = CALayer()
+    private let shader = OverlayShader()
     private var lastBackdropKey: String = ""
 
     override init(frame frameRect: NSRect) {
@@ -154,46 +155,11 @@ final class BlurOverlayView: NSView {
 
         CATransaction.commit()
 
-        applyShader(mode: settings.shaderMode, speed: settings.animationSpeed)
-    }
-
-    private func applyShader(mode: ShaderMode, speed: Double) {
-        layer?.removeAnimation(forKey: "shader")
-        layer?.opacity = 1
-        layer?.transform = CATransform3DIdentity
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        let s = max(0.1, speed)
-        switch mode {
-        case .staticMode:
-            return
-        case .breathing:
-            let a = CABasicAnimation(keyPath: "opacity")
-            a.fromValue = 0.75
-            a.toValue = 1.0
-            a.duration = 3.0 / s
-            a.autoreverses = true
-            a.repeatCount = .infinity
-            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            layer?.add(a, forKey: "shader")
-        case .pulse:
-            let a = CABasicAnimation(keyPath: "transform.scale")
-            a.fromValue = 1.0
-            a.toValue = 1.015
-            a.duration = 1.4 / s
-            a.autoreverses = true
-            a.repeatCount = .infinity
-            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            layer?.add(a, forKey: "shader")
-        case .drift:
-            let g = CAAnimationGroup()
-            let tx = CAKeyframeAnimation(keyPath: "transform.translation.x")
-            tx.values = [0, 8, 0, -8, 0]
-            let ty = CAKeyframeAnimation(keyPath: "transform.translation.y")
-            ty.values = [0, -6, 0, 6, 0]
-            g.animations = [tx, ty]
-            g.duration = 7.0 / s
-            g.repeatCount = .infinity
-            layer?.add(g, forKey: "shader")
+        if let layer {
+            shader.apply(
+                mode: settings.shaderMode, speed: settings.animationSpeed,
+                reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, to: layer
+            )
         }
     }
 
