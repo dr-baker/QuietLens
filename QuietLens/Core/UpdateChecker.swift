@@ -10,28 +10,33 @@ final class UpdateChecker: ObservableObject {
         case idle
         case checking
         case upToDate
+        case noRelease
         case available(version: String, url: URL)
         case failed
     }
 
     @Published private(set) var state: State = .idle
 
-    private static let releasesAPI = URL(string: "https://api.github.com/repos/quietapps/QuietLens/releases/latest")!
-    static let releasesPage = URL(string: "https://github.com/quietapps/QuietLens/releases/latest")!
+    private static let releasesAPI = URL(string: "https://api.github.com/repos/dr-baker/QuietLens/releases/latest")
+    static let releasesPage = URL(string: "https://github.com/dr-baker/QuietLens/releases")
 
     var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "—"
     }
 
     func check() {
-        guard state != .checking else { return }
+        guard state != .checking, let releasesAPI = Self.releasesAPI else { return }
         state = .checking
         Task {
             do {
-                var req = URLRequest(url: Self.releasesAPI)
+                var req = URLRequest(url: releasesAPI)
                 req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
                 req.timeoutInterval = 15
                 let (data, resp) = try await URLSession.shared.data(for: req)
+                if (resp as? HTTPURLResponse)?.statusCode == 404 {
+                    state = .noRelease
+                    return
+                }
                 guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
                     throw URLError(.badServerResponse)
                 }
@@ -44,7 +49,9 @@ final class UpdateChecker: ObservableObject {
                     ? String(release.tag_name.dropFirst())
                     : release.tag_name
                 if Self.isVersion(latest, newerThan: currentVersion) {
-                    let url = URL(string: release.html_url) ?? Self.releasesPage
+                    guard let url = URL(string: release.html_url) ?? Self.releasesPage else {
+                        throw URLError(.badURL)
+                    }
                     state = .available(version: latest, url: url)
                 } else {
                     state = .upToDate

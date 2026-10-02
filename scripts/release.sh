@@ -1,53 +1,42 @@
 #!/usr/bin/env bash
-# Release helper (unsigned / free-tier build).
-#
-# Usage:
-#   bash scripts/release.sh 1.0.3
-#
-# Produces build/QuietLens-VERSION.zip ready for GitHub Release upload.
-# The app is ad-hoc signed — users must install via Homebrew which strips
-# the quarantine xattr automatically.
+# Package a local archive. Publishing remains an explicit gh release command.
 set -euo pipefail
 
-VERSION="${1:?usage: release.sh VERSION (e.g. 1.0.3)}"
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+version="${1:?Usage: bash scripts/release.sh VERSION}"
+configured_version="$(sed -n 's/^    MARKETING_VERSION: "\(.*\)"$/\1/p' "$repo_dir/project.yml")"
+if [[ "$version" != "$configured_version" ]]; then
+  echo "Version $version does not match project.yml ($configured_version)." >&2
+  exit 2
+fi
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="$ROOT/build"
-ARCHIVE="$BUILD/QuietLens.xcarchive"
-APP="$ARCHIVE/Products/Applications/Quiet Lens.app"
-ZIP="$BUILD/QuietLens-${VERSION}.zip"
+mkdir -p "$repo_dir/build"
+release_dir="$(mktemp -d "$repo_dir/build/release-${version}.XXXXXX")"
+archive="$release_dir/QuietLens.xcarchive"
+app="$archive/Products/Applications/Quiet Lens.app"
+zip="$release_dir/QuietLens-${version}.zip"
 
-rm -rf "$BUILD"
-mkdir -p "$BUILD"
+signing_args=(CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO)
+if [[ -n "${QUIET_LENS_SIGNING_TEAM:-}" ]]; then
+  signing_args=(
+    CODE_SIGN_STYLE=Manual
+    "DEVELOPMENT_TEAM=$QUIET_LENS_SIGNING_TEAM"
+    "CODE_SIGN_IDENTITY=${QUIET_LENS_SIGNING_IDENTITY:-Developer ID Application}"
+    CODE_SIGNING_ALLOWED=YES
+  )
+fi
 
-echo "==> Regenerate Xcode project"
-(cd "$ROOT" && xcodegen generate)
-
-echo "==> Archive (ad-hoc signed)"
-xcodebuild -project "$ROOT/QuietLens.xcodeproj" -scheme QuietLens \
-  -configuration Release \
-  -archivePath "$ARCHIVE" \
+(cd "$repo_dir" && xcodegen generate)
+xcodebuild -quiet -project "$repo_dir/QuietLens.xcodeproj" -scheme QuietLens \
+  -configuration Release -archivePath "$archive" \
+  -derivedDataPath "$repo_dir/.build/xcode" \
   -destination 'generic/platform=macOS' \
-  CODE_SIGN_IDENTITY="-" \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGNING_ALLOWED=YES \
-  archive
+  'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+  "${signing_args[@]}" archive
+ditto -c -k --keepParent "$app" "$zip"
 
-echo "==> Zip"
-ditto -c -k --keepParent "$APP" "$ZIP"
-
-SHA=$(shasum -a 256 "$ZIP" | awk '{print $1}')
-SIZE=$(du -h "$ZIP" | awk '{print $1}')
-
-echo
-echo "Artifact: $ZIP ($SIZE)"
-echo "sha256:   $SHA"
-echo
-echo "Next:"
-echo "  gh release create $VERSION '$ZIP' -R quietapps/QuietLens \\"
-echo "    --title 'Quiet Lens $VERSION' \\"
-echo "    --notes-file CHANGELOG.md"
-echo
-echo "Then update quietapps/homebrew-quietlens Casks/quietlens.rb:"
-echo "  version \"$VERSION\""
-echo "  sha256 \"$SHA\""
+echo "Artifact: $zip"
+shasum -a 256 "$zip"
+echo "This script does not notarize or publish the archive."
+echo "Publish after verification:"
+echo "  gh release create '$version' '$zip' --repo dr-baker/QuietLens --title 'Quiet Lens $version' --notes-file CHANGELOG.md"

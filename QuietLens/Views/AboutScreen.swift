@@ -22,7 +22,7 @@ struct AboutScreen: View {
                         .shadow(color: .black.opacity(0.3), radius: 24, y: 12)
                     Text("Quiet Lens")
                         .font(.system(size: 24, weight: .semibold))
-                    Text("An app by Quiet Apps")
+                    Text("Maintained by Daniel Baker")
                         .font(FL.T.bodyR())
                         .foregroundStyle(FL.C.text2(scheme))
                     HStack(spacing: 6) {
@@ -47,20 +47,20 @@ struct AboutScreen: View {
 
             SectionLabel(text: "Links")
             GlassPanel {
-                LinkRow(icon: "globe", title: "Website",
-                        urlString: "https://github.com/quietapps/QuietLens",
+                LinkRow(icon: "globe", title: "Source",
+                        urlString: "https://github.com/dr-baker/QuietLens",
                         cta: "Open", isFirst: true)
                 LinkRow(icon: "doc.text", title: "License MIT",
                         urlString: "https://opensource.org/licenses/MIT",
                         cta: "View")
                 LinkRow(icon: "ant", title: "Report an issue",
-                        urlString: "https://github.com/quietapps/QuietLens/issues",
+                        urlString: "https://github.com/dr-baker/QuietLens/issues",
                         cta: "GitHub")
             }
 
             SectionLabel(text: "Credits")
             GlassPanel {
-                Text("Part of the Quiet Apps family. Inspired by Monocle. Built with Swift, SwiftUI, and AppKit. Follows the Quiet Apps brand system.")
+                Text("Fork of Quiet Lens by Parth Thummar and Quiet Apps. Inspired by Monocle. Built with Swift, SwiftUI, and AppKit.")
                     .font(FL.T.bodyR())
                     .foregroundStyle(FL.C.text2(scheme))
                     .padding(FL.S.s4)

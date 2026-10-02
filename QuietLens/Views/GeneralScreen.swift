@@ -105,6 +105,7 @@ struct GeneralScreen: View {
         case .idle: return "You're on version \(updates.currentVersion)."
         case .checking: return "Checking the latest release on GitHub…"
         case .upToDate: return "You're up to date (\(updates.currentVersion))."
+        case .noRelease: return "This fork has no published releases yet."
         case .available(let v, _): return "Version \(v) is available — you're on \(updates.currentVersion)."
         case .failed: return "Couldn't reach GitHub. Check your connection and try again."
         }
