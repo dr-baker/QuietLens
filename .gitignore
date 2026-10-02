@@ -57,3 +57,6 @@ fastlane/test_output
 *.tmp
 .env
 .env.local
+
+# Local feature worktrees and experiment artifacts
+agent_features/
